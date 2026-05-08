@@ -233,7 +233,7 @@ export type TransactionQuote = {
      */
     smartAccount?: import('abstractionkit').SafeAccountV0_3_0;
     /**
-     * - The chain id.
+     * - The chain id captured at quote time, used to sign the cached UserOperation for the right network.
      */
     chainId?: bigint;
 };
@@ -273,7 +273,7 @@ export type OnChainIdentifier = {
      */
     tool?: string;
     /**
-     * - The version of the tool.
+     * - Semver-style tool version string included in the on-chain marker (e.g. "1.0.0").
      */
     toolVersion?: string;
 };
@@ -291,7 +291,7 @@ export type EvmErc4337WalletCommonConfig = {
      */
     bundlerUrl: string;
     /**
-     * - The safe modules version.
+     * - Version of the Safe 4337 module set to deploy with the account (e.g. "0.3.0"). Determines the module addresses used in init code.
      */
     safeModulesVersion: string;
     /**
@@ -341,7 +341,7 @@ export type EvmErc4337WalletSponsorshipPolicyConfig = {
      */
     paymasterUrl: string;
     /**
-     * - The sponsorship policy id.
+     * - Identifier of the paymaster sponsorship policy to apply (provider-specific). Optional; some paymasters infer the policy from the project key.
      */
     sponsorshipPolicyId?: string;
 };

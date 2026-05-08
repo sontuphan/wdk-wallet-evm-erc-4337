@@ -64,7 +64,7 @@ export const FEE_TOLERANCE_COEFFICIENT = 120n
  * @property {string} txKey - A serialized key of the transaction used for cache matching.
  * @property {UserOperationV7} [userOp] - The built UserOperation, reusable by sendTransaction.
  * @property {SafeAccountV0_3_0} [smartAccount] - The smart account instance used to build the UserOperation.
- * @property {bigint} [chainId] - The chain id.
+ * @property {bigint} [chainId] - The chain id captured at quote time, used to sign the cached UserOperation for the right network.
  */
 
 /**
@@ -81,7 +81,7 @@ export const FEE_TOLERANCE_COEFFICIENT = 120n
  * @property {string} project - The project name included in the 50-byte on-chain marker.
  * @property {'Web' | 'Mobile' | 'Safe App' | 'Widget'} [platform] - The platform type (default: 'Web').
  * @property {string} [tool] - The tool name used to create the UserOperation.
- * @property {string} [toolVersion] - The version of the tool.
+ * @property {string} [toolVersion] - Semver-style tool version string included in the on-chain marker (e.g. "1.0.0").
  */
 
 /**
@@ -89,7 +89,7 @@ export const FEE_TOLERANCE_COEFFICIENT = 120n
  * @property {number} chainId - The blockchain's id (e.g., 1 for ethereum).
  * @property {string | Eip1193Provider} provider - The url of the rpc provider, or an instance of a class that implements eip-1193.
  * @property {string} bundlerUrl - The url of the bundler service.
- * @property {string} safeModulesVersion - The safe modules version.
+ * @property {string} safeModulesVersion - Version of the Safe 4337 module set to deploy with the account (e.g. "0.3.0"). Determines the module addresses used in init code.
  * @property {OnChainIdentifier | string} [onChainIdentifier] - Optional on-chain identifier. Appends a 50-byte project marker to every UserOperation callData. Pass a string to reuse it as the project name, or a full object for more control.
  */
 
@@ -109,7 +109,7 @@ export const FEE_TOLERANCE_COEFFICIENT = 120n
  * @property {true} isSponsored - Whether the paymaster is sponsoring the account.
  * @property {false} [useNativeCoins] - Whether to use native coins instead of a paymaster to pay for gas fees.
  * @property {string} paymasterUrl - The url of the paymaster service.
- * @property {string} [sponsorshipPolicyId] - The sponsorship policy id.
+ * @property {string} [sponsorshipPolicyId] - Identifier of the paymaster sponsorship policy to apply (provider-specific). Optional; some paymasters infer the policy from the project key.
  */
 
 /**
