@@ -183,8 +183,19 @@ export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOn
      * @returns {Promise<BuiltUserOperation>} The built operation, signing context, and (in token mode) the paymaster quote.
      */
     protected _buildUserOperation(calls: import('abstractionkit').MetaTransaction[], config: Omit<EvmErc4337WalletConfig, "transferMaxFee">): Promise<BuiltUserOperation>;
-    /** @protected */
-    protected _getUserOperationGasCost(txs: EvmTransaction[], config: Omit<EvmErc4337WalletConfig, "transferMaxFee">): Promise<object>;
+    /**
+     * Builds a UserOperation and returns its estimated gas cost.
+     *
+     * Returns the cost in the paymaster token when a token quote is available, otherwise in
+     * native wei. Used by `quoteSendTransaction` and reused by `sendTransaction` via the cache.
+     *
+     * @protected
+     * @param {EvmTransaction[]} txs - The EVM transactions to include in the UserOperation.
+     * @param {Omit<EvmErc4337WalletConfig, 'transferMaxFee'>} config - The wallet configuration to use for the build.
+     * @returns {Promise<BuiltUserOperation & { fee: bigint }>} The built operation plus its raw fee (no tolerance buffer applied).
+     * @throws {Error} If the token paymaster reports AA50 (account does not hold the paymaster token).
+     */
+    protected _getUserOperationGasCost(txs: EvmTransaction[], config: Omit<EvmErc4337WalletConfig, "transferMaxFee">): Promise<BuiltUserOperation & { fee: bigint }>;
 }
 export type Eip1193Provider = import("ethers").Eip1193Provider;
 export type EvmTransaction = import("@tetherto/wdk-wallet-evm").EvmTransaction;
