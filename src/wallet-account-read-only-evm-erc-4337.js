@@ -183,6 +183,12 @@ export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOn
 
     /** @private */
     this._ownerAccountAddress = address
+
+    /** @private */
+    this._deployedSmartAccount = undefined
+
+    /** @private */
+    this._evmReadOnlyAccount = undefined
   }
 
   /**
