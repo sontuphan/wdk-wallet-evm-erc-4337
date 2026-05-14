@@ -138,7 +138,6 @@ describe('@wdk/wallet-evm-erc-4337', () => {
       provider: 'http://localhost:8545',
       bundlerUrl: 'http://localhost:4337',
       paymasterUrl: 'http://localhost:3000?pimlico',
-      entryPointAddress: ENTRY_POINT_ADDRESS,
       paymasterAddress,
       safeModulesVersion: '0.3.0',
       paymasterToken: {
@@ -422,7 +421,6 @@ describe('@wdk/wallet-evm-erc-4337', () => {
       provider: 'http://localhost:8545',
       bundlerUrl: 'http://localhost:4337',
       paymasterUrl: 'http://localhost:3000?pimlico',
-      entryPointAddress: ENTRY_POINT_ADDRESS,
       paymasterAddress: paymasterAddress,
       safeModulesVersion: '0.3.0',
       paymasterToken: {
@@ -447,7 +445,7 @@ describe('@wdk/wallet-evm-erc-4337', () => {
 
   test('should use cached fee when sendTransaction is called with the same quoted params', async () => {
     const account0 = await wallet.getAccountByPath("0'/0/0")
-    account0._lastQuote = undefined
+    account0._quoteCache.clear()
     const quoteSpy = jest.spyOn(account0, 'quoteSendTransaction')
 
     const TX = {
@@ -487,7 +485,6 @@ describe('@wdk/wallet-evm-erc-4337', () => {
     const { hash: hashB } = await account0.sendTransaction(TX_B)
     await waitForTx(hashB, account0)
     expect(quoteSpy).toHaveBeenCalledTimes(2)
-    expect(account0._lastQuote).toBeUndefined()
 
     quoteSpy.mockRestore()
   }, TIMEOUT)
@@ -505,7 +502,8 @@ describe('@wdk/wallet-evm-erc-4337', () => {
     expect(fee).toBeGreaterThan(0n)
     expect(quoteSpy).toHaveBeenCalledTimes(1)
 
-    account0._lastQuote.createdAt = Date.now() - 3 * 60 * 1_000
+    const txKey = account0._quoteCache.keys().next().value
+    account0._quoteCache.get(txKey).createdAt = Date.now() - 3 * 60 * 1_000
 
     const { hash } = await account0.sendTransaction(TX)
     await waitForTx(hash, account0)
@@ -514,9 +512,9 @@ describe('@wdk/wallet-evm-erc-4337', () => {
     quoteSpy.mockRestore()
   }, TIMEOUT)
 
-  test('should return 0n fee for sponsored transactions and not cache the result', async () => {
+  test('should return 0n fee for sponsored transactions', async () => {
     const account0 = await wallet.getAccountByPath("0'/0/0")
-    account0._lastQuote = undefined
+    account0._quoteCache.clear()
     const quoteSpy = jest.spyOn(account0, 'quoteSendTransaction')
 
     const TX = {
@@ -538,7 +536,7 @@ describe('@wdk/wallet-evm-erc-4337', () => {
 
   test('should not consume cached transfer fee when approve is called in between', async () => {
     const account0 = await wallet.getAccountByPath("0'/0/0")
-    account0._lastQuote = undefined
+    account0._quoteCache.clear()
     const quoteSpy = jest.spyOn(account0, 'quoteSendTransaction')
 
     const TRANSFER = {

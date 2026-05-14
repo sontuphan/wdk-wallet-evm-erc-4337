@@ -14,7 +14,8 @@
 
 'use strict'
 
-/** @typedef {import('@tetherto/wdk-safe-relay-kit').UserOperationReceipt} UserOperationReceipt */
+/** @typedef {import('./src/wallet-account-read-only-evm-erc-4337.js').UserOperationReceipt} UserOperationReceipt */
+/** @typedef {import('./src/wallet-account-read-only-evm-erc-4337.js').BuiltUserOperation} BuiltUserOperation */
 
 /** @typedef {import('@tetherto/wdk-wallet-evm').FeeRates} FeeRates */
 
@@ -36,6 +37,12 @@
 /** @typedef {import('./src/wallet-account-read-only-evm-erc-4337.js').EvmErc4337WalletPaymasterTokenConfig} EvmErc4337WalletPaymasterTokenConfig */
 /** @typedef {import('./src/wallet-account-read-only-evm-erc-4337.js').EvmErc4337WalletSponsorshipPolicyConfig} EvmErc4337WalletSponsorshipPolicyConfig */
 /** @typedef {import('./src/wallet-account-read-only-evm-erc-4337.js').EvmErc4337WalletNativeCoinsConfig} EvmErc4337WalletNativeCoinsConfig */
+/** @typedef {import('./src/wallet-account-read-only-evm-erc-4337.js').OnChainIdentifier} OnChainIdentifier */
+/** @typedef {import('./src/wallet-account-read-only-evm-erc-4337.js').SafeAccountV0_3_0} SafeAccountV0_3_0 */
+/** @typedef {import('./src/wallet-account-read-only-evm-erc-4337.js').UserOperationV7} UserOperationV7 */
+/** @typedef {import('./src/wallet-account-read-only-evm-erc-4337.js').TokenQuote} TokenQuote */
+/** @typedef {import('./src/wallet-account-read-only-evm-erc-4337.js').MetaTransaction} MetaTransaction */
+/** @typedef {import('./src/wallet-account-read-only-evm-erc-4337.js').InitCodeOverrides} InitCodeOverrides */
 
 export { default } from './src/wallet-manager-evm-erc-4337.js'
 
