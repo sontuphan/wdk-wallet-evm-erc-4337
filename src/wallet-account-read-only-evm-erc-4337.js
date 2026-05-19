@@ -77,7 +77,7 @@ export const FEE_TOLERANCE_COEFFICIENT = 120n
 /**
  * @typedef {Object} EvmErc4337WalletCommonConfig
  * @property {number} chainId - The blockchain's id (e.g., 1 for ethereum).
- * @property {string | Eip1193Provider} provider - The url of the rpc provider, or an instance of a class that implements eip-1193.
+ * @property {string | Eip1193Provider | (string | Eip1193Provider)[]} provider - RPC provider: a URL string, an EIP-1193 provider object, or an array of either. When an array is supplied, the first Eip1193Provider is preferred; a URL string is used as a fallback.
  * @property {string} bundlerUrl - The url of the bundler service.
  * @property {string} safeModulesVersion - Version of the Safe 4337 module set to deploy with the account (e.g. "0.3.0"). Determines the module addresses used in init code.
  * @property {OnChainIdentifier | string} [onChainIdentifier] - Optional on-chain identifier. Appends a 50-byte project marker to every UserOperation callData. Pass a string to reuse it as the project name, or a full object for more control.
@@ -595,8 +595,12 @@ export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOn
   /** @private */
   static _resolveProviderRpc (provider) {
     if (typeof provider === 'string') return provider
-    if (Array.isArray(provider)) return provider.find(p => typeof p === 'string')
-    throw new ConfigurationError('The provider must be a string URL or an array containing a string URL.')
+    if (Array.isArray(provider)) {
+      const resolved = provider.find(p => typeof p !== 'string') ?? provider.find(p => typeof p === 'string')
+      if (!resolved) throw new ConfigurationError('The provider array must contain at least one string URL or Eip1193Provider.')
+      return resolved
+    }
+    return provider
   }
 
   /** @private */

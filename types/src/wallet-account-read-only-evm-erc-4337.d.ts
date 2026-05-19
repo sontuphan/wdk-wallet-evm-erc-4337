@@ -249,9 +249,10 @@ export type EvmErc4337WalletCommonConfig = {
      */
     chainId: number;
     /**
-     * - The url of the rpc provider, or an instance of a class that implements eip-1193.
+     * RPC provider: a URL string, an EIP-1193 provider object, or an array of either.
+     * When an array is supplied, the first Eip1193Provider is preferred; a URL string is used as a fallback.
      */
-    provider: string | Eip1193Provider;
+    provider: string | Eip1193Provider | (string | Eip1193Provider)[];
     /**
      * - The url of the bundler service.
      */

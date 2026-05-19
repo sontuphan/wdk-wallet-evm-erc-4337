@@ -489,6 +489,99 @@ describe('@wdk/wallet-evm-erc-4337', () => {
     quoteSpy.mockRestore()
   }, TIMEOUT)
 
+  describe('with EIP-1193 provider', () => {
+    let walletEip1193
+
+    beforeEach(() => {
+      const eip1193Provider = {
+        request ({ method, params }) {
+          return ethersProvider.send(method, params ?? [])
+        }
+      }
+
+      const config = {
+        chainId: 1,
+        provider: eip1193Provider,
+        bundlerUrl: 'http://localhost:4337',
+        paymasterUrl: 'http://localhost:3000?pimlico',
+        paymasterAddress,
+        safeModulesVersion: '0.3.0',
+        paymasterToken: {
+          address: MOCK_PAYMASTER_TOKEN_ADDRESS
+        }
+      }
+
+      walletEip1193 = new WalletManagerEvmErc4337(SEED_PHRASE, config)
+    })
+
+    test('should derive accounts with the same safe addresses as the URL-provider wallet', async () => {
+      const account0 = await walletEip1193.getAccountByPath("0'/0/0")
+      const account1 = await walletEip1193.getAccountByPath("0'/0/1")
+
+      expect(await account0.getAddress()).toBe(ACCOUNT0.safeAddress)
+      expect(await account1.getAddress()).toBe(ACCOUNT1.safeAddress)
+    }, TIMEOUT)
+
+    test('should quote and send a transaction using an Eip1193Provider', async () => {
+      const account0 = await walletEip1193.getAccountByPath("0'/0/0")
+      const account1 = await walletEip1193.getAccountByPath("0'/0/1")
+
+      const TX = { to: await account1.getAddress(), value: 0 }
+
+      const { fee: estimatedFee } = await account0.quoteSendTransaction(TX)
+      const { hash, fee } = await account0.sendTransaction(TX)
+      const receipt = await waitForTx(hash, account0)
+
+      expect(receipt.status).toBe(1)
+      expect(receipt.to).toBe(ENTRY_POINT_ADDRESS)
+      expect(fee).toBe(estimatedFee)
+    }, TIMEOUT)
+
+    test('should quote and transfer a token using an Eip1193Provider', async () => {
+      const account0 = await walletEip1193.getAccountByPath("0'/0/0")
+
+      const TRANSFER = {
+        token: testToken.target,
+        recipient: ACCOUNT1.safeAddress,
+        amount: 1n
+      }
+
+      const { fee: estimatedFee } = await account0.quoteTransfer(TRANSFER)
+      const { hash, fee } = await account0.transfer(TRANSFER)
+      const receipt = await waitForTx(hash, account0)
+
+      expect(receipt.status).toBe(1)
+      expect(fee).toBe(estimatedFee)
+    }, TIMEOUT)
+
+    test('should accept an array provider and prefer the Eip1193Provider', async () => {
+      const eip1193Provider = {
+        request ({ method, params }) {
+          return ethersProvider.send(method, params ?? [])
+        }
+      }
+
+      const config = {
+        chainId: 1,
+        provider: [eip1193Provider, 'http://localhost:8545'],
+        bundlerUrl: 'http://localhost:4337',
+        paymasterUrl: 'http://localhost:3000?pimlico',
+        paymasterAddress,
+        safeModulesVersion: '0.3.0',
+        paymasterToken: { address: MOCK_PAYMASTER_TOKEN_ADDRESS }
+      }
+
+      const arrayProviderWallet = new WalletManagerEvmErc4337(SEED_PHRASE, config)
+      const account0 = await arrayProviderWallet.getAccountByPath("0'/0/0")
+
+      const TX = { to: ACCOUNT1.safeAddress, value: 0 }
+      const { hash } = await account0.sendTransaction(TX)
+      const receipt = await waitForTx(hash, account0)
+
+      expect(receipt.status).toBe(1)
+    }, TIMEOUT)
+  })
+
   test('should re-quote when cached fee has expired', async () => {
     const account0 = await wallet.getAccountByPath("0'/0/0")
     const quoteSpy = jest.spyOn(account0, 'quoteSendTransaction')

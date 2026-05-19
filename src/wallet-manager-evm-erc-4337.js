@@ -46,18 +46,24 @@ export default class WalletManagerEvmErc4337 extends WalletManager {
      */
     this._config = config
 
-    const { provider } = config
+    const resolvedProvider = Array.isArray(config.provider)
+      ? (config.provider.find(p => typeof p !== 'string') ?? config.provider.find(p => typeof p === 'string'))
+      : config.provider
 
-    if (provider) {
+    if (resolvedProvider !== config.provider) {
+      this._config = { ...config, provider: resolvedProvider }
+    }
+
+    if (resolvedProvider) {
       /**
        * An ethers provider to interact with a node of the blockchain.
        *
        * @protected
        * @type {Provider | undefined}
        */
-      this._provider = typeof provider === 'string'
-        ? new JsonRpcProvider(provider)
-        : new BrowserProvider(provider)
+      this._provider = typeof resolvedProvider === 'string'
+        ? new JsonRpcProvider(resolvedProvider)
+        : new BrowserProvider(resolvedProvider)
     }
   }
 
