@@ -138,7 +138,6 @@ describe('@wdk/wallet-evm-erc-4337', () => {
       provider: 'http://localhost:8545',
       bundlerUrl: 'http://localhost:4337',
       paymasterUrl: 'http://localhost:3000?pimlico',
-      entryPointAddress: ENTRY_POINT_ADDRESS,
       paymasterAddress,
       safeModulesVersion: '0.3.0',
       paymasterToken: {
@@ -372,13 +371,13 @@ describe('@wdk/wallet-evm-erc-4337', () => {
   test('should fetch multiple token balances via getTokenBalances multicall', async () => {
     const account = await wallet.getAccountByPath("0'/0/0")
 
+    const expectedTestTokenBalance = await balanceOf(testToken, ACCOUNT0.safeAddress)
+    const expectedPaymasterTokenBalance = await balanceOf(mockPaymasterToken, ACCOUNT0.safeAddress)
+
     const balances = await account.getTokenBalances([
       testToken.target,
       MOCK_PAYMASTER_TOKEN_ADDRESS
     ])
-
-    const expectedTestTokenBalance = await balanceOf(testToken, ACCOUNT0.safeAddress)
-    const expectedPaymasterTokenBalance = await balanceOf(mockPaymasterToken, ACCOUNT0.safeAddress)
 
     expect(balances[testToken.target]).toBe(expectedTestTokenBalance)
     expect(balances[MOCK_PAYMASTER_TOKEN_ADDRESS]).toBe(expectedPaymasterTokenBalance)
@@ -422,7 +421,6 @@ describe('@wdk/wallet-evm-erc-4337', () => {
       provider: 'http://localhost:8545',
       bundlerUrl: 'http://localhost:4337',
       paymasterUrl: 'http://localhost:3000?pimlico',
-      entryPointAddress: ENTRY_POINT_ADDRESS,
       paymasterAddress: paymasterAddress,
       safeModulesVersion: '0.3.0',
       paymasterToken: {
@@ -447,7 +445,7 @@ describe('@wdk/wallet-evm-erc-4337', () => {
 
   test('should use cached fee when sendTransaction is called with the same quoted params', async () => {
     const account0 = await wallet.getAccountByPath("0'/0/0")
-    account0._lastQuote = undefined
+    account0._quoteCache.clear()
     const quoteSpy = jest.spyOn(account0, 'quoteSendTransaction')
 
     const TX = {
@@ -487,10 +485,102 @@ describe('@wdk/wallet-evm-erc-4337', () => {
     const { hash: hashB } = await account0.sendTransaction(TX_B)
     await waitForTx(hashB, account0)
     expect(quoteSpy).toHaveBeenCalledTimes(2)
-    expect(account0._lastQuote).toBeUndefined()
 
     quoteSpy.mockRestore()
   }, TIMEOUT)
+
+  describe('with EIP-1193 provider', () => {
+    let walletEip1193
+
+    beforeEach(() => {
+      const eip1193Provider = {
+        request ({ method, params }) {
+          return ethersProvider.send(method, params ?? [])
+        }
+      }
+
+      const config = {
+        chainId: 1,
+        provider: eip1193Provider,
+        bundlerUrl: 'http://localhost:4337',
+        paymasterUrl: 'http://localhost:3000?pimlico',
+        paymasterAddress,
+        safeModulesVersion: '0.3.0',
+        paymasterToken: {
+          address: MOCK_PAYMASTER_TOKEN_ADDRESS
+        }
+      }
+
+      walletEip1193 = new WalletManagerEvmErc4337(SEED_PHRASE, config)
+    })
+
+    test('should derive accounts with the same safe addresses as the URL-provider wallet', async () => {
+      const account0 = await walletEip1193.getAccountByPath("0'/0/0")
+      const account1 = await walletEip1193.getAccountByPath("0'/0/1")
+
+      expect(await account0.getAddress()).toBe(ACCOUNT0.safeAddress)
+      expect(await account1.getAddress()).toBe(ACCOUNT1.safeAddress)
+    }, TIMEOUT)
+
+    test('should quote and send a transaction using an Eip1193Provider', async () => {
+      const account0 = await walletEip1193.getAccountByPath("0'/0/0")
+      const account1 = await walletEip1193.getAccountByPath("0'/0/1")
+
+      const TX = { to: await account1.getAddress(), value: 0 }
+
+      const { fee: estimatedFee } = await account0.quoteSendTransaction(TX)
+      const { hash, fee } = await account0.sendTransaction(TX)
+      const receipt = await waitForTx(hash, account0)
+
+      expect(receipt.status).toBe(1)
+      expect(receipt.to).toBe(ENTRY_POINT_ADDRESS)
+      expect(fee).toBe(estimatedFee)
+    }, TIMEOUT)
+
+    test('should quote and transfer a token using an Eip1193Provider', async () => {
+      const account0 = await walletEip1193.getAccountByPath("0'/0/0")
+
+      const TRANSFER = {
+        token: testToken.target,
+        recipient: ACCOUNT1.safeAddress,
+        amount: 1n
+      }
+
+      const { fee: estimatedFee } = await account0.quoteTransfer(TRANSFER)
+      const { hash, fee } = await account0.transfer(TRANSFER)
+      const receipt = await waitForTx(hash, account0)
+
+      expect(receipt.status).toBe(1)
+      expect(fee).toBe(estimatedFee)
+    }, TIMEOUT)
+
+    test('should accept an array provider of multiple formats', async () => {
+      const eip1193Provider = {
+        request ({ method, params }) {
+          return ethersProvider.send(method, params ?? [])
+        }
+      }
+
+      const config = {
+        chainId: 1,
+        provider: [eip1193Provider, 'http://localhost:8545'],
+        bundlerUrl: 'http://localhost:4337',
+        paymasterUrl: 'http://localhost:3000?pimlico',
+        paymasterAddress,
+        safeModulesVersion: '0.3.0',
+        paymasterToken: { address: MOCK_PAYMASTER_TOKEN_ADDRESS }
+      }
+
+      const arrayProviderWallet = new WalletManagerEvmErc4337(SEED_PHRASE, config)
+      const account0 = await arrayProviderWallet.getAccountByPath("0'/0/0")
+
+      const TX = { to: ACCOUNT1.safeAddress, value: 0 }
+      const { hash } = await account0.sendTransaction(TX)
+      const receipt = await waitForTx(hash, account0)
+
+      expect(receipt.status).toBe(1)
+    }, TIMEOUT)
+  })
 
   test('should re-quote when cached fee has expired', async () => {
     const account0 = await wallet.getAccountByPath("0'/0/0")
@@ -505,7 +595,8 @@ describe('@wdk/wallet-evm-erc-4337', () => {
     expect(fee).toBeGreaterThan(0n)
     expect(quoteSpy).toHaveBeenCalledTimes(1)
 
-    account0._lastQuote.createdAt = Date.now() - 3 * 60 * 1_000
+    const txKey = account0._quoteCache.keys().next().value
+    account0._quoteCache.get(txKey).createdAt = Date.now() - 3 * 60 * 1_000
 
     const { hash } = await account0.sendTransaction(TX)
     await waitForTx(hash, account0)
@@ -514,9 +605,9 @@ describe('@wdk/wallet-evm-erc-4337', () => {
     quoteSpy.mockRestore()
   }, TIMEOUT)
 
-  test('should return 0n fee for sponsored transactions and not cache the result', async () => {
+  test('should return 0n fee for sponsored transactions', async () => {
     const account0 = await wallet.getAccountByPath("0'/0/0")
-    account0._lastQuote = undefined
+    account0._quoteCache.clear()
     const quoteSpy = jest.spyOn(account0, 'quoteSendTransaction')
 
     const TX = {
@@ -538,7 +629,7 @@ describe('@wdk/wallet-evm-erc-4337', () => {
 
   test('should not consume cached transfer fee when approve is called in between', async () => {
     const account0 = await wallet.getAccountByPath("0'/0/0")
-    account0._lastQuote = undefined
+    account0._quoteCache.clear()
     const quoteSpy = jest.spyOn(account0, 'quoteSendTransaction')
 
     const TRANSFER = {

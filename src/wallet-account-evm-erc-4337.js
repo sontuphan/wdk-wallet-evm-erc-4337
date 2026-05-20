@@ -18,9 +18,23 @@ import { Contract } from 'ethers'
 
 import { WalletAccountEvm } from '@tetherto/wdk-wallet-evm'
 
-import WalletAccountReadOnlyEvmErc4337 from './wallet-account-read-only-evm-erc-4337.js'
+import { AbstractionKitError } from 'abstractionkit'
 
-/** @typedef {import('ethers').Eip1193Provider} Eip1193Provider */
+import WalletAccountReadOnlyEvmErc4337, { FEE_TOLERANCE_COEFFICIENT } from './wallet-account-read-only-evm-erc-4337.js'
+
+/** @typedef {import('abstractionkit').UserOperationV7} UserOperationV7 */
+/** @typedef {import('abstractionkit').SafeAccountV0_3_0} SafeAccountV0_3_0 */
+
+/**
+ * @internal
+ * @typedef {Object} TransactionQuote
+ * @property {bigint} fee - The estimated fee with tolerance buffer applied.
+ * @property {number} createdAt - The timestamp when the quote was created.
+ * @property {string} txKey - A serialized key of the transaction used for cache matching.
+ * @property {UserOperationV7} [userOp] - The built UserOperation, reusable by sendTransaction.
+ * @property {SafeAccountV0_3_0} [smartAccount] - The smart account instance used to build the UserOperation.
+ * @property {bigint} [chainId] - The chain id captured at quote time, used to sign the cached UserOperation for the right network.
+ */
 
 /** @typedef {import('@tetherto/wdk-wallet').IWalletAccount} IWalletAccount */
 
@@ -37,9 +51,6 @@ import WalletAccountReadOnlyEvmErc4337 from './wallet-account-read-only-evm-erc-
 /** @typedef {import('./wallet-account-read-only-evm-erc-4337.js').EvmErc4337WalletSponsorshipPolicyConfig} EvmErc4337WalletSponsorshipPolicyConfig */
 /** @typedef {import('./wallet-account-read-only-evm-erc-4337.js').TypedData} TypedData */
 /** @typedef {import('./wallet-account-read-only-evm-erc-4337.js').EvmErc4337WalletNativeCoinsConfig} EvmErc4337WalletNativeCoinsConfig */
-
-/** @typedef {import('@tetherto/wdk-safe-relay-kit').Safe4337Pack} Safe4337Pack */
-/** @typedef {import('@safe-global/types-kit').SafeOperation} SafeOperation */
 
 const QUOTE_MAX_AGE_MS = 2 * 60 * 1_000
 
@@ -69,6 +80,14 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
 
     /** @private */
     this._ownerAccount = ownerAccount
+
+    /**
+     * Cached quotes from fee estimations, keyed by serialized transaction.
+     *
+     * @private
+     * @type {Map<string, TransactionQuote>}
+     */
+    this._quoteCache = new Map()
   }
 
   /**
@@ -184,6 +203,46 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
   }
 
   /**
+   * Quotes the costs of a send transaction operation.
+   *
+   * The result is cached internally for up to 2 minutes. If `sendTransaction` is called with the
+   * same transaction within that window, the cached fee is reused without an additional RPC round-trip.
+   *
+   * @param {EvmTransaction | EvmTransaction[]} tx - The transaction, or an array of multiple transactions to send in batch.
+   * @param {Partial<EvmErc4337WalletPaymasterTokenConfig | EvmErc4337WalletSponsorshipPolicyConfig | EvmErc4337WalletNativeCoinsConfig>} [config] - If set, overrides the given configuration options.
+   * @returns {Promise<Omit<TransactionResult, 'hash'>>} The transaction's quotes.
+   */
+  async quoteSendTransaction (tx, config) {
+    const mergedConfig = { ...this._config, ...config }
+
+    if (config) {
+      this._validateConfig(mergedConfig)
+    }
+
+    const txKey = WalletAccountEvmErc4337._getTxKey(tx)
+
+    if (mergedConfig.isSponsored) {
+      this._quoteCache.set(txKey, { fee: 0n, createdAt: Date.now(), txKey })
+      return { fee: 0n }
+    }
+
+    const gasCostResult = await this._getUserOperationGasCost([tx].flat(), mergedConfig)
+
+    const fee = BigInt(gasCostResult.fee) * FEE_TOLERANCE_COEFFICIENT / 100n
+
+    this._quoteCache.set(txKey, {
+      fee,
+      createdAt: Date.now(),
+      txKey,
+      userOp: gasCostResult.userOp,
+      smartAccount: gasCostResult.smartAccount,
+      chainId: gasCostResult.chainId
+    })
+
+    return { fee }
+  }
+
+  /**
    * Sends a transaction.
    *
    * @param {EvmTransaction | EvmTransaction[]} tx -  The transaction, or an array of multiple transactions to send in batch.
@@ -197,17 +256,17 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
       this._validateConfig(mergedConfig)
     }
 
-    const { isSponsored, useNativeCoins } = mergedConfig
+    let cached = this._consumeCachedQuote(tx)
+    if (!cached) {
+      await this.quoteSendTransaction(tx, config)
+      cached = this._consumeCachedQuote(tx)
+    }
 
-    const fee = this._getValidCachedFee(tx) ?? (await this.quoteSendTransaction(tx, config)).fee
-    this._lastQuote = undefined
+    const fee = cached.fee
 
-    const amountToApprove = (isSponsored || useNativeCoins) ? 0n : fee
+    const hash = await this._sendUserOperation([tx].flat(), { config: mergedConfig, cachedBuild: cached })
 
-    const hash = await this._sendUserOperation([tx].flat(), {
-      ...mergedConfig,
-      amountToApprove
-    })
+    this._quoteCache.clear()
 
     return { hash, fee }
   }
@@ -226,23 +285,25 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
       this._validateConfig(mergedConfig)
     }
 
-    const { isSponsored, useNativeCoins, transferMaxFee } = mergedConfig
+    const { isSponsored, transferMaxFee } = mergedConfig
 
     const tx = await WalletAccountEvm._getTransferTransaction(options)
 
-    const fee = this._getValidCachedFee(tx) ?? (await this.quoteSendTransaction(tx, config)).fee
-    this._lastQuote = undefined
+    let cached = this._consumeCachedQuote(tx)
+    if (!cached) {
+      await this.quoteSendTransaction(tx, config)
+      cached = this._consumeCachedQuote(tx)
+    }
+
+    const fee = cached.fee
 
     if (!isSponsored && transferMaxFee !== undefined && fee >= transferMaxFee) {
       throw new Error('Exceeded maximum fee cost for transfer operation.')
     }
 
-    const amountToApprove = (isSponsored || useNativeCoins) ? 0n : fee
+    const hash = await this._sendUserOperation([tx], { config: mergedConfig, cachedBuild: cached })
 
-    const hash = await this._sendUserOperation([tx], {
-      ...mergedConfig,
-      amountToApprove
-    })
+    this._quoteCache.clear()
 
     return { hash, fee }
   }
@@ -267,99 +328,51 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     this._ownerAccount.dispose()
   }
 
-  /**
-   * Returns the safe's erc-4337 pack of the account.
-   * Extends parent implementation by adding signer for transaction signing.
-   *
-   * @protected
-   * @param {Omit<EvmErc4337WalletConfig, 'transferMaxFee'>} [config] - The configuration object. Defaults to this._config if not provided.
-   * @returns {Promise<Safe4337Pack>} The safe's erc-4337 pack.
-   */
-  async _getSafe4337Pack (config = this._config) {
-    const safe4337Pack = await super._getSafe4337Pack(config)
-
-    const safeProvider = safe4337Pack.protocolKit.getSafeProvider()
-
-    if (!safeProvider.signer) {
-      safeProvider.signer = this._ownerAccount._account
-    }
-
-    return safe4337Pack
+  /** @private */
+  static _getTxKey (tx) {
+    return JSON.stringify([tx].flat(), (_, v) => typeof v === 'bigint' ? v.toString() : v)
   }
 
-  /**
-   * Returns the cached fee if it exists, is not expired, and matches the given transaction.
-   * Clears cache on match or expiry; preserves it on mismatch.
-   *
-   * @private
-   * @param {EvmTransaction | EvmTransaction[]} tx - The transaction to match against.
-   * @returns {bigint | undefined} The cached fee, or undefined if not available, expired, or mismatched.
-   */
-  _getValidCachedFee (tx) {
-    const quote = this._lastQuote
+  /** @private */
+  _consumeCachedQuote (tx) {
+    const txKey = WalletAccountEvmErc4337._getTxKey(tx)
+    const quote = this._quoteCache.get(txKey)
 
     if (!quote) {
       return undefined
     }
 
+    this._quoteCache.delete(txKey)
+
     if (Date.now() - quote.createdAt > QUOTE_MAX_AGE_MS) {
-      this._lastQuote = undefined
       return undefined
     }
 
-    if (WalletAccountReadOnlyEvmErc4337._getTxKey(tx) !== quote.txKey) {
-      return undefined
-    }
-
-    this._lastQuote = undefined
-
-    return quote.fee
+    return quote
   }
 
   /** @private */
-  async _buildSignedUserOperation (txs, { amountToApprove, ...config }) {
-    const { useNativeCoins, paymasterToken, isSponsored, sponsorshipPolicyId } = config
-
-    const safe4337Pack = await this._getSafe4337Pack(config)
-
-    const address = await this.getAddress()
-
-    const twoMinutesFromNow = Math.floor(Date.now() / 1_000) + 2 * 60
-
-    const options = {
-      amountToApprove,
-      paymasterTokenAddress: (isSponsored || useNativeCoins) ? undefined : paymasterToken?.address,
-      isSponsored,
-      sponsorshipPolicyId: isSponsored ? sponsorshipPolicyId : undefined
-    }
-
-    const safeOperation = await safe4337Pack.createTransaction({
-      transactions: txs.map(tx => ({ from: address, ...tx })),
-      options: {
-        validUntil: twoMinutesFromNow,
-        feeEstimator: await this._getFeeEstimator(),
-        ...options
-      }
-    })
-
-    const signedSafeOperation = await safe4337Pack.signSafeOperation(safeOperation)
-
-    return { safe4337Pack, signedSafeOperation }
-  }
-
-  /** @private */
-  async _sendUserOperation (txs, config) {
+  async _sendUserOperation (txs, { config, cachedBuild }) {
     try {
-      const { safe4337Pack, signedSafeOperation } = await this._buildSignedUserOperation(txs, config)
+      const { userOp, smartAccount, chainId } = cachedBuild?.userOp
+        ? cachedBuild
+        : await this._buildUserOperation(WalletAccountReadOnlyEvmErc4337._toMetaTransactions(txs), config)
 
-      return await safe4337Pack.executeTransaction({
-        executable: signedSafeOperation
-      })
+      const signer = {
+        address: this._ownerAccountAddress,
+        signHash: async (hash) => this._ownerAccount._account.signingKey.sign(hash).serialized
+      }
+      userOp.signature = await smartAccount.signUserOperationWithSigners(
+        userOp,
+        [signer],
+        chainId
+      )
+
+      return await this._getBundler().sendUserOperation(userOp, smartAccount.entrypointAddress)
     } catch (err) {
-      if (err.message.includes('AA50')) {
+      if (err instanceof AbstractionKitError && err.message.includes('AA50')) {
         throw new Error('Not enough funds on the safe account to repay the paymaster.')
       }
-
       throw err
     }
   }

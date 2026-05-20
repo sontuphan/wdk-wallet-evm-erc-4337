@@ -17,6 +17,8 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     protected _config: EvmErc4337WalletConfig;
     /** @private */
     private _ownerAccount;
+    /** @private */
+    private _quoteCache;
     /**
      * The derivation path's index of this account.
      *
@@ -66,6 +68,17 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
      */
     approve(options: ApproveOptions): Promise<TransactionResult>;
     /**
+     * Quotes the costs of a send transaction operation.
+     *
+     * The result is cached internally for up to 2 minutes. If `sendTransaction` is called with the
+     * same transaction within that window, the cached fee is reused without an additional RPC round-trip.
+     *
+     * @param {EvmTransaction | EvmTransaction[]} tx - The transaction, or an array of multiple transactions to send in batch.
+     * @param {Partial<EvmErc4337WalletPaymasterTokenConfig | EvmErc4337WalletSponsorshipPolicyConfig | EvmErc4337WalletNativeCoinsConfig>} [config] - If set, overrides the given configuration options.
+     * @returns {Promise<Omit<TransactionResult, 'hash'>>} The transaction's quotes.
+     */
+    quoteSendTransaction(tx: EvmTransaction | EvmTransaction[], config?: Partial<EvmErc4337WalletPaymasterTokenConfig | EvmErc4337WalletSponsorshipPolicyConfig | EvmErc4337WalletNativeCoinsConfig>): Promise<Omit<TransactionResult, "hash">>;
+    /**
      * Sends a transaction.
      *
      * @param {EvmTransaction | EvmTransaction[]} tx -  The transaction, or an array of multiple transactions to send in batch.
@@ -91,24 +104,10 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
      * Disposes the wallet account, erasing the private key from the memory.
      */
     dispose(): void;
-    /**
-     * Returns the safe's erc-4337 pack of the account.
-     * Extends parent implementation by adding signer for transaction signing.
-     *
-     * @protected
-     * @param {Omit<EvmErc4337WalletConfig, 'transferMaxFee'>} [config] - The configuration object. Defaults to this._config if not provided.
-     * @returns {Promise<Safe4337Pack>} The safe's erc-4337 pack.
-     */
-    protected _getSafe4337Pack(config?: EvmErc4337WalletConfig): Promise<Safe4337Pack>;
-    /**
-     * Returns the cached fee if it exists, is not expired, and matches the given transaction.
-     * Clears cache on match or expiry; preserves it on mismatch.
-     *
-     * @private
-     * @param {EvmTransaction | EvmTransaction[]} tx - The transaction to match against.
-     * @returns {bigint | undefined} The cached fee, or undefined if not available, expired, or mismatched.
-     */
-    private _getValidCachedFee;
+    /** @private */
+    private static _getTxKey;
+    /** @private */
+    private _consumeCachedQuote;
     /** @private */
     private _buildSignedUserOperation;
     /** @private */
@@ -122,11 +121,10 @@ export type TransactionResult = import("@tetherto/wdk-wallet-evm").TransactionRe
 export type TransferOptions = import("@tetherto/wdk-wallet-evm").TransferOptions;
 export type TransferResult = import("@tetherto/wdk-wallet-evm").TransferResult;
 export type ApproveOptions = import("@tetherto/wdk-wallet-evm").ApproveOptions;
-export type TypedData = import("./wallet-account-read-only-evm-erc-4337.js").TypedData;
 export type EvmErc4337WalletConfig = import("./wallet-account-read-only-evm-erc-4337.js").EvmErc4337WalletConfig;
 export type EvmErc4337WalletPaymasterTokenConfig = import("./wallet-account-read-only-evm-erc-4337.js").EvmErc4337WalletPaymasterTokenConfig;
 export type EvmErc4337WalletSponsorshipPolicyConfig = import("./wallet-account-read-only-evm-erc-4337.js").EvmErc4337WalletSponsorshipPolicyConfig;
+export type TypedData = import("./wallet-account-read-only-evm-erc-4337.js").TypedData;
 export type EvmErc4337WalletNativeCoinsConfig = import("./wallet-account-read-only-evm-erc-4337.js").EvmErc4337WalletNativeCoinsConfig;
 export type SafeOperation = import("@safe-global/types-kit").SafeOperation;
 import WalletAccountReadOnlyEvmErc4337 from './wallet-account-read-only-evm-erc-4337.js';
-import { Safe4337Pack } from '@tetherto/wdk-safe-relay-kit';

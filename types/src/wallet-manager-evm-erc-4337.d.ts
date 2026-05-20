@@ -7,19 +7,12 @@ export default class WalletManagerEvmErc4337 extends WalletManager {
      */
     constructor(seed: string | Uint8Array, config: EvmErc4337WalletConfig);
     /**
-     * The evm erc-4337 wallet configuration.
-     *
-     * @protected
-     * @type {EvmErc4337WalletConfig}
-     */
-    protected _config: EvmErc4337WalletConfig;
-    /**
      * An ethers provider to interact with a node of the blockchain.
      *
      * @protected
-     * @type {Provider | undefined}
+     * @type {Provider}
      */
-    protected _provider: Provider | undefined;
+    protected _provider: Provider;
     /**
      * Returns the wallet account at a specific index (see [BIP-44](https://github.com/bitcoin/bips/blob/master/bip-0044.mediawiki)).
      *

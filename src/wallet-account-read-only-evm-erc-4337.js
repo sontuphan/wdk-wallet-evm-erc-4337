@@ -14,21 +14,39 @@
 
 'use strict'
 
+import { JsonRpcProvider } from 'ethers'
+
 import { WalletAccountReadOnly } from '@tetherto/wdk-wallet'
 
 import { WalletAccountReadOnlyEvm } from '@tetherto/wdk-wallet-evm'
 
-import { Safe4337Pack, GenericFeeEstimator, PimlicoFeeEstimator } from '@tetherto/wdk-safe-relay-kit'
+import {
+  // eslint-disable-next-line camelcase
+  SafeAccountV0_3_0 as SafeAccount030,
+  AbstractionKitError,
+  Bundler,
+  Erc7677Paymaster,
+  ENTRYPOINT_V7,
+  calculateUserOperationMaxGasCost
+} from 'abstractionkit'
+
+/** @typedef {import('abstractionkit').InitCodeOverrides} InitCodeOverrides */
+/** @typedef {import('abstractionkit').MetaTransaction} MetaTransaction */
+/** @typedef {import('abstractionkit').SafeAccountV0_3_0} SafeAccountV0_3_0 */
+
+import FailoverProvider from '@tetherto/wdk-failover-provider'
 
 import { ConfigurationError } from './errors.js'
 
-const FEE_TOLERANCE_COEFFICIENT = 120n
+const PaymasterMode = {
+  NATIVE: 'native',
+  SPONSORED: 'sponsored',
+  TOKEN: 'token'
+}
+
+export const FEE_TOLERANCE_COEFFICIENT = 120n
 
 /** @typedef {import('ethers').Eip1193Provider} Eip1193Provider */
-
-/** @typedef {import('@tetherto/wdk-safe-relay-kit').UserOperationReceipt} UserOperationReceipt */
-
-/** @typedef {import('@tetherto/wdk-safe-relay-kit').IFeeEstimator} IFeeEstimator */
 
 /** @typedef {import('@tetherto/wdk-wallet-evm').EvmTransaction} EvmTransaction */
 /** @typedef {import('@tetherto/wdk-wallet-evm').TransactionResult} TransactionResult */
@@ -39,20 +57,35 @@ const FEE_TOLERANCE_COEFFICIENT = 120n
 
 /** @typedef {import('@tetherto/wdk-wallet-evm').TypedData} TypedData */
 
+/** @typedef {import('abstractionkit').UserOperationReceiptResult} UserOperationReceipt */
+/** @typedef {import('abstractionkit').UserOperationV7} UserOperationV7 */
+/** @typedef {import('abstractionkit').TokenQuote} TokenQuote */
+
 /**
- * @typedef {Object} CachedQuote
- * @property {bigint} fee - The estimated fee with tolerance buffer applied.
- * @property {number} createdAt - The timestamp when the quote was created.
- * @property {string} txKey - A serialized key of the transaction used for cache matching.
+ * @typedef {Object} BuiltUserOperation
+ * @property {UserOperationV7} userOp - The fully-populated UserOperation ready to sign.
+ * @property {SafeAccountV0_3_0} smartAccount - The Safe account that will execute the operation.
+ * @property {'native' | 'sponsored' | 'token'} mode - The paymaster mode used to build the operation.
+ * @property {bigint} chainId - The chain id captured at build time.
+ * @property {TokenQuote} [tokenQuote] - The paymaster token quote, present only in token mode.
+ */
+
+/**
+ * @typedef {Object} OnChainIdentifier
+ * @property {string} project - The project name included in the 50-byte on-chain marker.
+ * @property {'Web' | 'Mobile' | 'Safe App' | 'Widget'} [platform] - The platform type (default: 'Web').
+ * @property {string} [tool] - The tool name used to create the UserOperation.
+ * @property {string} [toolVersion] - Semver-style tool version string included in the on-chain marker (e.g. "1.0.0").
  */
 
 /**
  * @typedef {Object} EvmErc4337WalletCommonConfig
  * @property {number} chainId - The blockchain's id (e.g., 1 for ethereum).
- * @property {string | Eip1193Provider} provider - The url of the rpc provider, or an instance of a class that implements eip-1193.
+ * @property {string | Eip1193Provider | Array<string | Eip1193Provider>} provider - The url of the rpc provider, or an instance of a class that implements eip-1193. It's also possible to provide an array of urls or EIP 1193 providers instead. In such case, connection errors will cause the wallet to automatically fallback on the next provider in the list.
+ * @property {number} [retries] - If set and if 'provider' is a list of urls or EIP 1193 providers, the number of additional retry attempts after the initial call fails. Total attempts = `1 + retries`. For example, `retries: 3` with 4 providers will try each provider once before throwing. If `retries` exceeds the number of providers, the failover will loop back and retry already-failed providers in round-robin order. Default: 3.
  * @property {string} bundlerUrl - The url of the bundler service.
- * @property {string} entryPointAddress - The address of the entry point smart contract.
- * @property {string} safeModulesVersion - The safe modules version.
+ * @property {string} safeModulesVersion - Version of the Safe 4337 module set to deploy with the account (e.g. "0.3.0"). Determines the module addresses used in init code.
+ * @property {OnChainIdentifier | string} [onChainIdentifier] - Optional on-chain identifier. Appends a 50-byte project marker to every UserOperation callData. Pass a string to reuse it as the project name, or a full object for more control.
  */
 
 /**
@@ -71,7 +104,7 @@ const FEE_TOLERANCE_COEFFICIENT = 120n
  * @property {true} isSponsored - Whether the paymaster is sponsoring the account.
  * @property {false} [useNativeCoins] - Whether to use native coins instead of a paymaster to pay for gas fees.
  * @property {string} paymasterUrl - The url of the paymaster service.
- * @property {string} [sponsorshipPolicyId] - The sponsorship policy id.
+ * @property {string} [sponsorshipPolicyId] - Identifier of the paymaster sponsorship policy to apply (provider-specific). Optional; some paymasters infer the policy from the project key.
  */
 
 /**
@@ -87,14 +120,26 @@ const FEE_TOLERANCE_COEFFICIENT = 120n
 
 export const SALT_NONCE = '0x69b348339eea4ed93f9d11931c3b894c8f9d8c7663a053024b11cb7eb4e5a1f6'
 
+const SAFE_MODULES_MAP = {
+  '0.3.0': {
+    safe4337ModuleAddress: '0x75cf11467937ce3F2f357CE24ffc3DBF8fD5c226',
+    safeModuleSetupAddress: '0x2dd68b007B46fBe91B9A7c3EDa5A7a1063cB5b47'
+  }
+}
+
 export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOnly {
   /**
    * Creates a new read-only evm [erc-4337](https://www.erc4337.io/docs) wallet account.
    *
    * @param {string} address - The evm account's address.
    * @param {Omit<EvmErc4337WalletConfig, 'transferMaxFee'>} config - The configuration object.
+   * @throws {ConfigurationError} If `config.safeModulesVersion` is not in the supported set.
    */
   constructor (address, config) {
+    if (!SAFE_MODULES_MAP[config.safeModulesVersion]) {
+      throw new ConfigurationError(`Unsupported safe modules version: ${config.safeModulesVersion}`)
+    }
+
     const safeAddress = WalletAccountReadOnlyEvmErc4337.predictSafeAddress(address, config)
 
     super(safeAddress)
@@ -108,28 +153,12 @@ export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOn
     this._config = config
 
     /**
-     * Map of Safe4337Pack instances cached by configuration.
+     * Cached AbstractionKit bundler.
      *
      * @protected
-     * @type {Map<string, Safe4337Pack>}
+     * @type {Bundler | undefined}
      */
-    this._safe4337Packs = new Map()
-
-    /**
-     * The fee estimator.
-     *
-     * @protected
-     * @type {IFeeEstimator | undefined}
-     */
-    this._feeEstimator = undefined
-
-    /**
-     * Cached quote from the last fee estimation.
-     *
-     * @protected
-     * @type {CachedQuote | undefined}
-     */
-    this._lastQuote = undefined
+    this._bundler = undefined
 
     /**
      * The chain id.
@@ -139,28 +168,47 @@ export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOn
      */
     this._chainId = undefined
 
+    /**
+     * Cached Erc7677Paymaster instances keyed by URL.
+     *
+     * @protected
+     * @type {Map<string, Erc7677Paymaster>}
+     */
+    this._paymasters = new Map()
+
     /** @private */
     this._ownerAccountAddress = address
+
+    /**
+     * An EIP-1193–compatible provider used to interact with the blockchain.
+     *
+     * Note: the provider type is restricted to EIP-1193 to ensure compatibility
+     * with Safe4337Pack and to enable the failover mechanism. While RPC URLs
+     * can still be provided in the configuration, they are internally wrapped
+     * into an EIP-1193 provider.
+     *
+     * @protected
+     * @type {Eip1193Provider}
+     */
+    this._provider = this._createFailoverProvider(this._config)
+
+    /** @private */
+    this._deployedSmartAccount = undefined
+
+    /** @private */
+    this._evmReadOnlyAccount = undefined
   }
 
   /**
    * Predicts the address of a safe account.
    *
    * @param {string} owner - The safe owner's address.
-   * @param {Pick<EvmErc4337WalletConfig, 'chainId' | 'safeModulesVersion'>} config - The safe configuration
+   * @param {Pick<EvmErc4337WalletConfig, 'safeModulesVersion' | 'onChainIdentifier'>} config - The safe configuration.
    * @returns {string} The Safe address.
    */
-  static predictSafeAddress (owner, { chainId, safeModulesVersion }) {
-    const safeAddress = Safe4337Pack.predictSafeAddress({
-      owners: [owner],
-      threshold: 1,
-      saltNonce: SALT_NONCE,
-      chainId,
-      safeVersion: '1.4.1',
-      safeModulesVersion
-    })
-
-    return safeAddress
+  static predictSafeAddress (owner, config) {
+    const overrides = WalletAccountReadOnlyEvmErc4337._getInitCodeOverrides(config)
+    return SafeAccount030.createAccountAddress([owner], overrides)
   }
 
   /**
@@ -202,12 +250,13 @@ export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOn
    * Returns the account's balance for the paymaster token provided in the wallet account configuration.
    *
    * @returns {Promise<bigint>} The paymaster token balance (in base unit).
+   * @throws {ConfigurationError} If no paymaster token is configured (sponsored or native-coins mode).
    */
   async getPaymasterTokenBalance () {
     const { paymasterToken } = this._config
 
     if (!paymasterToken) {
-      throw new Error('Paymaster token is not configured.')
+      throw new ConfigurationError('Paymaster token is not configured.')
     }
 
     return await this.getTokenBalance(paymasterToken.address)
@@ -222,6 +271,8 @@ export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOn
    * @param {EvmTransaction | EvmTransaction[]} tx - The transaction, or an array of multiple transactions to send in batch.
    * @param {Partial<EvmErc4337WalletPaymasterTokenConfig | EvmErc4337WalletSponsorshipPolicyConfig | EvmErc4337WalletNativeCoinsConfig>} [config] - If set, overrides the given configuration options.
    * @returns {Promise<Omit<TransactionResult, 'hash'>>} The transaction's quotes.
+   * @throws {ConfigurationError} If the override `config` is invalid or has missing required fields.
+   * @throws {Error} If the token paymaster reports AA50 (account does not hold the paymaster token).
    */
   async quoteSendTransaction (tx, config) {
     const mergedConfig = { ...this._config, ...config }
@@ -230,20 +281,15 @@ export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOn
       this._validateConfig(mergedConfig)
     }
 
-    const { isSponsored, useNativeCoins } = mergedConfig
+    const { isSponsored } = mergedConfig
 
     if (isSponsored) {
       return { fee: 0n }
     }
 
-    const estimatedFee = await this._getUserOperationGasCost([tx].flat(), {
-      ...mergedConfig,
-      amountToApprove: useNativeCoins ? 0n : BigInt(Number.MAX_SAFE_INTEGER)
-    })
+    const gasCostResult = await this._getUserOperationGasCost([tx].flat(), mergedConfig)
 
-    const fee = BigInt(estimatedFee) * FEE_TOLERANCE_COEFFICIENT / 100n
-
-    this._lastQuote = { fee, createdAt: Date.now(), txKey: WalletAccountReadOnlyEvmErc4337._getTxKey(tx) }
+    const fee = BigInt(gasCostResult.fee) * FEE_TOLERANCE_COEFFICIENT / 100n
 
     return { fee }
   }
@@ -257,6 +303,8 @@ export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOn
    * @param {TransferOptions} options - The transfer's options.
    * @param {Partial<EvmErc4337WalletPaymasterTokenConfig | EvmErc4337WalletSponsorshipPolicyConfig | EvmErc4337WalletNativeCoinsConfig>} [config] - If set, overrides the given configuration options.
    * @returns {Promise<Omit<TransferResult, 'hash'>>} The transfer's quotes.
+   * @throws {ConfigurationError} If the override `config` is invalid or has missing required fields.
+   * @throws {Error} If the token paymaster reports AA50 (account does not hold the paymaster token).
    */
   async quoteTransfer (options, config) {
     const tx = await WalletAccountReadOnlyEvm._getTransferTransaction(options)
@@ -273,17 +321,13 @@ export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOn
    * @returns {Promise<EvmTransactionReceipt | null>} – The receipt, or null if the transaction has not been included in a block yet.
    */
   async getTransactionReceipt (hash) {
-    const safe4337Pack = await this._getSafe4337Pack()
-
+    const bundler = this._getBundler()
     const evmReadOnlyAccount = await this._getEvmReadOnlyAccount()
 
-    const userOp = await safe4337Pack.getUserOperationByHash(hash)
+    const result = await bundler.getUserOperationByHash(hash)
+    if (!result || !result.transactionHash) return null
 
-    if (!userOp || !userOp.transactionHash) {
-      return null
-    }
-
-    return await evmReadOnlyAccount.getTransactionReceipt(userOp.transactionHash)
+    return await evmReadOnlyAccount.getTransactionReceipt(result.transactionHash)
   }
 
   /**
@@ -293,11 +337,9 @@ export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOn
    * @returns {Promise<UserOperationReceipt | null>} – The receipt, or null if the user operation has not been included in a block yet.
    */
   async getUserOperationReceipt (hash) {
-    const safe4337Pack = await this._getSafe4337Pack()
+    const bundler = this._getBundler()
 
-    const userOp = await safe4337Pack.getUserOperationReceipt(hash)
-
-    return userOp
+    return await bundler.getUserOperationReceipt(hash)
   }
 
   /**
@@ -380,51 +422,46 @@ export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOn
   }
 
   /**
-   * Returns the safe's erc-4337 pack of the account.
+   * Builds a safe account instance for the current owner.
    *
    * @protected
-   * @param {Omit<EvmErc4337WalletConfig, 'transferMaxFee'>} [config] - The configuration object. Defaults to this._config if not provided.
-   * @returns {Promise<Safe4337Pack>} The safe's erc-4337 pack.
+   * @param {Omit<EvmErc4337WalletConfig, 'transferMaxFee'>} [config] - The wallet configuration. Defaults to the instance configuration.
+   * @returns {Promise<SafeAccountV0_3_0>} The safe account instance.
    */
-  async _getSafe4337Pack (config = this._config) {
-    const { isSponsored, useNativeCoins, paymasterUrl, paymasterAddress, paymasterToken } = config
+  async _getSmartAccount (config = this._config) {
+    if (this._deployedSmartAccount) return this._deployedSmartAccount
 
-    let cacheKey
-    if (useNativeCoins) {
-      cacheKey = 'native'
-    } else if (isSponsored) {
-      cacheKey = `sponsored:${paymasterUrl}`
-    } else {
-      cacheKey = `paymaster:${paymasterUrl}:${paymasterAddress}`
+    const overrides = WalletAccountReadOnlyEvmErc4337._getInitCodeOverrides(config)
+    const safeAddress = await this.getAddress()
+
+    if (await SafeAccount030.isDeployed(safeAddress, this._provider)) {
+      this._deployedSmartAccount = new SafeAccount030(safeAddress, overrides)
+      return this._deployedSmartAccount
     }
 
-    if (!this._safe4337Packs.has(cacheKey)) {
-      const safe4337Pack = await Safe4337Pack.init({
-        provider: config.provider,
-        bundlerUrl: config.bundlerUrl,
-        safeModulesVersion: config.safeModulesVersion,
-        options: {
-          owners: [this._ownerAccountAddress],
-          threshold: 1,
-          saltNonce: SALT_NONCE
-        },
-        customContracts: {
-          entryPointAddress: config.entryPointAddress
-        },
-        paymasterOptions: useNativeCoins
-          ? undefined
-          : {
-              paymasterUrl,
-              paymasterAddress,
-              paymasterTokenAddress: paymasterToken?.address,
-              skipApproveTransaction: true
-            }
-      })
+    return SafeAccount030.initializeNewAccount([this._ownerAccountAddress], overrides)
+  }
 
-      this._safe4337Packs.set(cacheKey, safe4337Pack)
+  /**
+   * Returns an AbstractionKit Bundler for querying UserOperations.
+   *
+   * @protected
+   * @returns {Bundler} The bundler.
+   */
+  _getBundler () {
+    if (!this._bundler) {
+      this._bundler = new Bundler(this._config.bundlerUrl)
     }
+    return this._bundler
+  }
 
-    return this._safe4337Packs.get(cacheKey)
+  /** @private */
+  _getPaymaster (url, options = {}) {
+    if (!this._paymasters.has(url)) {
+      const provider = WalletAccountReadOnlyEvmErc4337._detectProvider(url)
+      this._paymasters.set(url, new Erc7677Paymaster(url, { ...options, provider }))
+    }
+    return this._paymasters.get(url)
   }
 
   /**
@@ -435,14 +472,59 @@ export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOn
    */
   async _getChainId () {
     if (!this._chainId) {
-      const evmReadOnlyAccount = await this._getEvmReadOnlyAccount()
+      const chainId = await this._provider.request({ method: 'eth_chainId' })
 
-      const { chainId } = await evmReadOnlyAccount._provider.getNetwork()
-
-      this._chainId = chainId
+      this._chainId = BigInt(chainId)
     }
 
     return this._chainId
+  }
+
+  /**
+   * Wraps a string RPC URL or provider into an EIP-1193 compatible provider.
+   *
+   * @protected
+   * @param {string | Eip1193Provider} provider - The url of the rpc provider, or an instance of a class that implements eip-1193.
+   * @returns { Eip1193Provider } A wrapped Eip1193Provider instance.
+   */
+  _wrapEip1193Provider (provider) {
+    return typeof provider === 'string'
+      ? {
+          provider: new JsonRpcProvider(provider),
+          request ({ method, params }) {
+            return this.provider.send(method, params ?? [])
+          }
+        }
+      : provider
+  }
+
+  /**
+   * Creates a FailoverProvider from the configured providers. If only one provider is supplied, it is wrapped and returned.
+   *
+   * @protected
+   * @param {Omit<EvmErc4337WalletConfig, 'transferMaxFee'>} [config] - The configuration object.
+   * @returns {Eip1193Provider} A wrapped Eip1193Provider instance.
+   * @throws {Error} If the `provider` option is set to an empty array.
+   */
+  _createFailoverProvider (config = this._config) {
+    const { provider, retries = 3 } = config
+
+    if (Array.isArray(provider)) {
+      if (!provider.length) {
+        throw new Error("The 'provider' option cannot be set to an empty list.")
+      }
+
+      const failoverProvider = new FailoverProvider({ retries })
+
+      for (const entry of provider) {
+        const option = this._wrapEip1193Provider(entry)
+        failoverProvider.addProvider(option)
+      }
+
+      return failoverProvider.initialize()
+    }
+
+    return this._wrapEip1193Provider(provider)
   }
 
   /** @private */
@@ -455,82 +537,161 @@ export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOn
     return this._evmReadOnlyAccount
   }
 
-  /** @private */
-  async _getFeeEstimator () {
-    if (!this._feeEstimator) {
-      const { bundlerUrl } = this._config
-      const isPimlico = bundlerUrl?.includes('pimlico')
-
-      if (isPimlico) {
-        this._feeEstimator = new PimlicoFeeEstimator()
-      } else {
-        const chainId = await this._getChainId()
-
-        this._feeEstimator = new GenericFeeEstimator(
-          this._config.provider,
-          `0x${chainId.toString(16)}`
-        )
-      }
-    }
-
-    return this._feeEstimator
+  /**
+   * Converts EVM transactions to AbstractionKit MetaTransaction calls.
+   *
+   * @protected
+   * @param {EvmTransaction[]} txs - The transactions to convert.
+   * @returns {MetaTransaction[]} The calls array for createUserOperation.
+   */
+  static _toMetaTransactions (txs) {
+    return txs.map(tx => ({
+      to: tx.to,
+      value: tx.value !== undefined ? BigInt(tx.value) : 0n,
+      data: tx.data ?? '0x'
+    }))
   }
 
   /**
-   * Returns a serialized key for transaction cache matching.
+   * Builds the init code overrides from the wallet configuration.
    *
    * @protected
-   * @param {EvmTransaction | EvmTransaction[]} tx - The transaction(s) to serialize.
-   * @returns {string} The serialized transaction key.
+   * @param {Pick<EvmErc4337WalletConfig, 'safeModulesVersion' | 'onChainIdentifier'>} config - The wallet configuration fields used for init code generation.
+   * @returns {InitCodeOverrides} The init code overrides for SafeAccount creation.
    */
-  static _getTxKey (tx) {
-    return JSON.stringify([tx].flat(), (_, v) => typeof v === 'bigint' ? v.toString() : v)
+  static _getInitCodeOverrides (config) {
+    const { safeModulesVersion, onChainIdentifier } = config
+    const modules = SAFE_MODULES_MAP[safeModulesVersion]
+
+    const overrides = {
+      c2Nonce: BigInt(SALT_NONCE),
+      entrypointAddress: ENTRYPOINT_V7,
+      safe4337ModuleAddress: modules.safe4337ModuleAddress,
+      safeModuleSetupAddress: modules.safeModuleSetupAddress
+    }
+
+    if (onChainIdentifier) {
+      overrides.onChainIdentifierParams = typeof onChainIdentifier === 'string'
+        ? { project: onChainIdentifier }
+        : onChainIdentifier
+    }
+
+    return overrides
+  }
+
+  /**
+   * Builds a UserOperation with paymaster fields applied.
+   *
+   * @protected
+   * @param {MetaTransaction[]} calls - The meta-transactions to include in the UserOperation.
+   * @param {Omit<EvmErc4337WalletConfig, 'transferMaxFee'>} config - The wallet configuration.
+   * @returns {Promise<BuiltUserOperation>} The built operation, signing context, and (in token mode) the paymaster quote.
+   */
+  async _buildUserOperation (calls, config) {
+    const smartAccount = await this._getSmartAccount(config)
+    const chainId = await this._getChainId()
+
+    const mode = WalletAccountReadOnlyEvmErc4337._resolvePaymasterMode(config)
+    const provider = mode !== PaymasterMode.NATIVE
+      ? WalletAccountReadOnlyEvmErc4337._detectProvider(config.paymasterUrl)
+      : null
+
+    const gasPrice = await this._fetchBundlerGasPrice(config.bundlerUrl)
+
+    const baseUserOp = (mode === PaymasterMode.NATIVE || provider === 'candide')
+      ? await smartAccount.createUserOperation(calls, this._provider, config.bundlerUrl, gasPrice)
+      : await smartAccount.createUserOperation(calls, this._provider, undefined, { skipGasEstimation: true, ...gasPrice })
+
+    if (mode === PaymasterMode.NATIVE) {
+      return { userOp: baseUserOp, smartAccount, mode, chainId }
+    }
+
+    const { userOp, tokenQuote } = await this._applyPaymasterToUserOp({
+      mode, smartAccount, userOp: baseUserOp, config, chainId
+    })
+    return { userOp, smartAccount, mode, chainId, tokenQuote }
+  }
+
+  /**
+   * Builds a UserOperation and returns its estimated gas cost.
+   *
+   * Returns the cost in the paymaster token when a token quote is available, otherwise in
+   * native wei. Used by `quoteSendTransaction` and reused by `sendTransaction` via the cache.
+   *
+   * @protected
+   * @param {EvmTransaction[]} txs - The EVM transactions to include in the UserOperation.
+   * @param {Omit<EvmErc4337WalletConfig, 'transferMaxFee'>} config - The wallet configuration to use for the build.
+   * @returns {Promise<BuiltUserOperation & Omit<TransactionResult, 'hash'>>} The built operation plus its raw fee (no tolerance buffer applied).
+   * @throws {Error} If the token paymaster reports AA50 (account does not hold the paymaster token).
+   */
+  async _getUserOperationGasCost (txs, config) {
+    const calls = WalletAccountReadOnlyEvmErc4337._toMetaTransactions(txs)
+
+    try {
+      const buildResult = await this._buildUserOperation(calls, config)
+
+      const fee = buildResult.tokenQuote
+        ? buildResult.tokenQuote.tokenCost
+        : calculateUserOperationMaxGasCost(buildResult.userOp)
+
+      return { fee, ...buildResult }
+    } catch (error) {
+      if (error instanceof AbstractionKitError && error.message.includes('AA50')) {
+        throw new Error(
+          'Token paymaster requires the account to hold the paymaster token for fee estimation. ' +
+          'Fund the account with the paymaster token before quoting.'
+        )
+      }
+      throw error
+    }
   }
 
   /** @private */
-  async _getUserOperationGasCost (txs, { amountToApprove, ...config }) {
-    const safe4337Pack = await this._getSafe4337Pack(config)
+  static _resolvePaymasterMode (config) {
+    if (config.useNativeCoins) return PaymasterMode.NATIVE
+    if (config.isSponsored) return PaymasterMode.SPONSORED
+    return PaymasterMode.TOKEN
+  }
 
-    const address = await this.getAddress()
+  /** @private */
+  async _fetchBundlerGasPrice (bundlerUrl) {
+    if (WalletAccountReadOnlyEvmErc4337._detectProvider(bundlerUrl) !== 'pimlico') return undefined
 
-    const paymasterTokenAddress = config.useNativeCoins ? undefined : config.paymasterToken?.address
+    const erc7677 = this._getPaymaster(bundlerUrl)
+    const result = await erc7677.sendRPCRequest('pimlico_getUserOperationGasPrice', [])
+    if (!result?.fast) return undefined
 
-    try {
-      const safeOperation = await safe4337Pack.createTransaction({
-        transactions: txs.map(tx => ({ from: address, ...tx })),
-        options: {
-          feeEstimator: await this._getFeeEstimator(),
-          amountToApprove,
-          paymasterTokenAddress
-        }
-      })
-
-      const {
-        callGasLimit,
-        verificationGasLimit,
-        preVerificationGas,
-        paymasterVerificationGasLimit,
-        paymasterPostOpGasLimit,
-        maxFeePerGas
-      } = safeOperation.userOperation
-
-      const gasCost = (callGasLimit + verificationGasLimit + preVerificationGas + paymasterVerificationGasLimit + paymasterPostOpGasLimit) * maxFeePerGas
-
-      if (!paymasterTokenAddress) {
-        return gasCost
-      }
-
-      const exchangeRate = await safe4337Pack.getTokenExchangeRate(paymasterTokenAddress)
-
-      const gasCostInPaymasterToken = (gasCost * exchangeRate + (10n ** 18n - 1n)) / (10n ** 18n)
-
-      return gasCostInPaymasterToken
-    } catch (error) {
-      if (error.message.includes('AA50')) {
-        throw new Error('Simulation failed: not enough funds in the safe account to repay the paymaster.')
-      }
-
-      throw error
+    return {
+      maxFeePerGas: BigInt(result.fast.maxFeePerGas),
+      maxPriorityFeePerGas: BigInt(result.fast.maxPriorityFeePerGas)
     }
+  }
+
+  /** @private */
+  static _detectProvider (url) {
+    const detected = Erc7677Paymaster.detectProvider(url)
+    if (detected) return detected
+    if (url?.includes('pimlico')) return 'pimlico'
+    if (url?.includes('candide')) return 'candide'
+    return null
+  }
+
+  /** @private */
+  async _applyPaymasterToUserOp ({ mode, smartAccount, userOp, config, chainId }) {
+    const erc7677 = this._getPaymaster(config.paymasterUrl, { chainId: BigInt(chainId) })
+
+    const context = mode === PaymasterMode.TOKEN
+      ? { token: config.paymasterToken.address }
+      : { sponsorshipPolicyId: config.sponsorshipPolicyId }
+
+    const result = await erc7677.createPaymasterUserOperation(
+      smartAccount,
+      userOp,
+      config.bundlerUrl,
+      context,
+      { entrypoint: ENTRYPOINT_V7 }
+    )
+
+    return { userOp: result.userOperation, tokenQuote: result.tokenQuote }
   }
 }

@@ -14,7 +14,6 @@ module.exports = {
       },
       forking: {
         url: 'https://ethereum-rpc.publicnode.com',
-        blockNumber: 22897572,
         enabled: true
       },
       mining: {
