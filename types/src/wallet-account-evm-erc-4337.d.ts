@@ -56,9 +56,9 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
      *
      * @param {EvmTransaction} tx - The transaction to include in the user operation.
      * @param {Partial<EvmErc4337WalletPaymasterTokenConfig | EvmErc4337WalletSponsorshipPolicyConfig | EvmErc4337WalletNativeCoinsConfig>} [config] - If set, overrides the given configuration options.
-     * @returns {Promise<SafeOperation>} The signed safe operation.
+     * @returns {Promise<UserOperationV7>} The signed user operation.
      */
-    signTransaction(tx: EvmTransaction, config?: Partial<EvmErc4337WalletPaymasterTokenConfig | EvmErc4337WalletSponsorshipPolicyConfig | EvmErc4337WalletNativeCoinsConfig>): Promise<SafeOperation>;
+    signTransaction(tx: EvmTransaction, config?: Partial<EvmErc4337WalletPaymasterTokenConfig | EvmErc4337WalletSponsorshipPolicyConfig | EvmErc4337WalletNativeCoinsConfig>): Promise<UserOperationV7>;
     /**
      * Approves a specific amount of tokens to a spender.
      *
@@ -109,7 +109,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     /** @private */
     private _consumeCachedQuote;
     /** @private */
-    private _buildSignedUserOperation;
+    private _signUserOperation;
     /** @private */
     private _sendUserOperation;
 }
@@ -126,5 +126,6 @@ export type EvmErc4337WalletPaymasterTokenConfig = import("./wallet-account-read
 export type EvmErc4337WalletSponsorshipPolicyConfig = import("./wallet-account-read-only-evm-erc-4337.js").EvmErc4337WalletSponsorshipPolicyConfig;
 export type TypedData = import("./wallet-account-read-only-evm-erc-4337.js").TypedData;
 export type EvmErc4337WalletNativeCoinsConfig = import("./wallet-account-read-only-evm-erc-4337.js").EvmErc4337WalletNativeCoinsConfig;
-export type SafeOperation = import("@safe-global/types-kit").SafeOperation;
+export type UserOperationV7 = import("abstractionkit").UserOperationV7;
+export type SafeAccountV0_3_0 = import("abstractionkit").SafeAccountV0_3_0;
 import WalletAccountReadOnlyEvmErc4337 from './wallet-account-read-only-evm-erc-4337.js';

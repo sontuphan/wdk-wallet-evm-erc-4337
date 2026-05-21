@@ -142,7 +142,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
    *
    * @param {EvmTransaction} tx - The transaction to include in the user operation.
    * @param {Partial<EvmErc4337WalletPaymasterTokenConfig | EvmErc4337WalletSponsorshipPolicyConfig | EvmErc4337WalletNativeCoinsConfig>} [config] - If set, overrides the given configuration options.
-   * @returns {Promise<SafeOperation>} The signed safe operation.
+   * @returns {Promise<UserOperationV7>} The signed user operation.
    */
   async signTransaction (tx, config) {
     const mergedConfig = { ...this._config, ...config }
@@ -151,19 +151,17 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
       this._validateConfig(mergedConfig)
     }
 
-    const { isSponsored, useNativeCoins } = mergedConfig
+    let cached = this._consumeCachedQuote(tx)
+    if (!cached) {
+      await this.quoteSendTransaction(tx, config)
+      cached = this._consumeCachedQuote(tx)
+    }
 
-    const fee = this._getValidCachedFee(tx) ?? (await this.quoteSendTransaction(tx, config)).fee
-    this._lastQuote = undefined
+    const { userOp } = await this._signUserOperation([tx], { config: mergedConfig, cachedBuild: cached })
 
-    const amountToApprove = (isSponsored || useNativeCoins) ? 0n : fee
+    this._quoteCache.clear()
 
-    const { signedSafeOperation } = await this._buildSignedUserOperation([tx], {
-      ...mergedConfig,
-      amountToApprove
-    })
-
-    return signedSafeOperation
+    return userOp
   }
 
   /**
@@ -352,21 +350,28 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
   }
 
   /** @private */
+  async _signUserOperation (txs, { config, cachedBuild }) {
+    const { userOp, smartAccount, chainId } = cachedBuild?.userOp
+      ? cachedBuild
+      : await this._buildUserOperation(WalletAccountReadOnlyEvmErc4337._toMetaTransactions(txs), config)
+
+    const signer = {
+      address: this._ownerAccountAddress,
+      signHash: async (hash) => this._ownerAccount._account.signingKey.sign(hash).serialized
+    }
+    userOp.signature = await smartAccount.signUserOperationWithSigners(
+      userOp,
+      [signer],
+      chainId
+    )
+
+    return { userOp, smartAccount, chainId }
+  }
+
+  /** @private */
   async _sendUserOperation (txs, { config, cachedBuild }) {
     try {
-      const { userOp, smartAccount, chainId } = cachedBuild?.userOp
-        ? cachedBuild
-        : await this._buildUserOperation(WalletAccountReadOnlyEvmErc4337._toMetaTransactions(txs), config)
-
-      const signer = {
-        address: this._ownerAccountAddress,
-        signHash: async (hash) => this._ownerAccount._account.signingKey.sign(hash).serialized
-      }
-      userOp.signature = await smartAccount.signUserOperationWithSigners(
-        userOp,
-        [signer],
-        chainId
-      )
+      const { userOp, smartAccount } = await this._signUserOperation(txs, { config, cachedBuild })
 
       return await this._getBundler().sendUserOperation(userOp, smartAccount.entrypointAddress)
     } catch (err) {

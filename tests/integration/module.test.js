@@ -660,7 +660,7 @@ describe('@wdk/wallet-evm-erc-4337', () => {
     quoteSpy.mockRestore()
   }, TIMEOUT)
 
-  test('should sign a user operation without broadcasting, then broadcast it manually via safe4337Pack', async () => {
+  test('should sign a user operation without broadcasting, then broadcast it manually via the bundler', async () => {
     const account0 = await wallet.getAccountByPath("0'/0/0")
     const account1 = await wallet.getAccountByPath("0'/0/1")
 
@@ -671,12 +671,12 @@ describe('@wdk/wallet-evm-erc-4337', () => {
       value: ethers.parseEther('1')
     }
 
-    const signedSafeOperation = await account0.signTransaction(TRANSACTION)
+    const signedUserOp = await account0.signTransaction(TRANSACTION)
 
-    expect(signedSafeOperation.userOperation.sender).toBe(ACCOUNT0.safeAddress)
+    expect(signedUserOp.sender.toLowerCase()).toBe(ACCOUNT0.safeAddress.toLowerCase())
+    expect(signedUserOp.signature).toMatch(/^0x[0-9a-f]+$/i)
 
-    const safe4337Pack = await account0._getSafe4337Pack()
-    const hash = await safe4337Pack.executeTransaction({ executable: signedSafeOperation })
+    const hash = await account0._getBundler().sendUserOperation(signedUserOp, ENTRY_POINT_ADDRESS)
 
     await waitForTx(hash, account1)
 
