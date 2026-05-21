@@ -18,7 +18,7 @@ import { Contract } from 'ethers'
 
 import { WalletAccountEvm } from '@tetherto/wdk-wallet-evm'
 
-import { AbstractionKitError } from 'abstractionkit'
+import { AbstractionKitError, fetchAccountNonce } from 'abstractionkit'
 
 import WalletAccountReadOnlyEvmErc4337, { FEE_TOLERANCE_COEFFICIENT } from './wallet-account-read-only-evm-erc-4337.js'
 
@@ -306,12 +306,28 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     if (quotesWithUserOp.length === 0) return
 
     const { smartAccount } = quotesWithUserOp[0]
-    const providerRpc = WalletAccountReadOnlyEvmErc4337._resolveProviderRpc(this._config.provider)
-    const onChainNonce = await smartAccount.getNonce(providerRpc)
+    const onChainNonce = await fetchAccountNonce(this._provider, smartAccount.entrypointAddress, smartAccount.accountAddress)
 
-    for (const quote of quotesWithUserOp) {
+    const mode = WalletAccountReadOnlyEvmErc4337._resolvePaymasterMode(this._config)
+
+    await Promise.all(quotesWithUserOp.map(async (quote) => {
       quote.userOp.nonce = onChainNonce + 1n
-    }
+
+      if (mode !== 'native') {
+        try {
+          const { userOp } = await this._applyPaymasterToUserOp({
+            mode,
+            smartAccount: quote.smartAccount,
+            userOp: quote.userOp,
+            config: this._config,
+            chainId: quote.chainId
+          })
+          quote.userOp = userOp
+        } catch {
+          this._quoteCache.delete(quote.txKey)
+        }
+      }
+    }))
   }
 
   /** @private */

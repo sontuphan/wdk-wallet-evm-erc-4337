@@ -467,6 +467,7 @@ describe('@wdk/wallet-evm-erc-4337', () => {
 
   test('should not use cached fee when sendTransaction params differ from quoted params', async () => {
     const account0 = await wallet.getAccountByPath("0'/0/0")
+    account0._quoteCache.clear()
     const quoteSpy = jest.spyOn(account0, 'quoteSendTransaction')
 
     const TX_A = {
@@ -584,6 +585,7 @@ describe('@wdk/wallet-evm-erc-4337', () => {
 
   test('should re-quote when cached fee has expired', async () => {
     const account0 = await wallet.getAccountByPath("0'/0/0")
+    account0._quoteCache.clear()
     const quoteSpy = jest.spyOn(account0, 'quoteSendTransaction')
 
     const TX = {
