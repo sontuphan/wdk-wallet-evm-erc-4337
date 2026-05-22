@@ -467,6 +467,7 @@ describe('@wdk/wallet-evm-erc-4337', () => {
 
   test('should not use cached fee when sendTransaction params differ from quoted params', async () => {
     const account0 = await wallet.getAccountByPath("0'/0/0")
+    account0._quoteCache.clear()
     const quoteSpy = jest.spyOn(account0, 'quoteSendTransaction')
 
     const TX_A = {
@@ -584,6 +585,7 @@ describe('@wdk/wallet-evm-erc-4337', () => {
 
   test('should re-quote when cached fee has expired', async () => {
     const account0 = await wallet.getAccountByPath("0'/0/0")
+    account0._quoteCache.clear()
     const quoteSpy = jest.spyOn(account0, 'quoteSendTransaction')
 
     const TX = {
@@ -627,7 +629,7 @@ describe('@wdk/wallet-evm-erc-4337', () => {
     quoteSpy.mockRestore()
   }, TIMEOUT)
 
-  test('should not consume cached transfer fee when approve is called in between', async () => {
+  test('should preserve and bump cached transfer quote when another tx is sent in between', async () => {
     const account0 = await wallet.getAccountByPath("0'/0/0")
     account0._quoteCache.clear()
     const quoteSpy = jest.spyOn(account0, 'quoteSendTransaction')
@@ -653,7 +655,7 @@ describe('@wdk/wallet-evm-erc-4337', () => {
 
     const { hash, fee: transferFee } = await account0.transfer(TRANSFER)
     await waitForTx(hash, account0)
-    expect(quoteSpy).toHaveBeenCalledTimes(3)
+    expect(quoteSpy).toHaveBeenCalledTimes(2)
 
     expect(transferFee).toBe(quotedFee)
 
@@ -680,7 +682,41 @@ describe('@wdk/wallet-evm-erc-4337', () => {
     await waitForTx(hash, account1)
 
     const balance1After = await ethersProvider.getBalance(ACCOUNT1.safeAddress)
-
     expect(balance1After).toBe(balance1Before + ethers.parseEther('1'))
+  }, TIMEOUT)
+  
+  test('should reuse bumped cached nonce for sequential quoted transactions', async () => {
+    const account0 = await wallet.getAccountByPath("0'/0/0")
+    account0._quoteCache.clear()
+    const quoteSpy = jest.spyOn(account0, 'quoteSendTransaction')
+
+    const TX_A = {
+      to: ACCOUNT1.safeAddress,
+      value: 0
+    }
+
+    const TX_B = {
+      to: ACCOUNT0.safeAddress,
+      value: 0
+    }
+
+    const { fee: feeA } = await account0.quoteSendTransaction(TX_A)
+    const { fee: feeB } = await account0.quoteSendTransaction(TX_B)
+
+    expect(quoteSpy).toHaveBeenCalledTimes(2)
+
+    const { hash: hashA, fee: sentFeeA } = await account0.sendTransaction(TX_A)
+
+    await waitForTx(hashA, account0)
+
+    expect(quoteSpy).toHaveBeenCalledTimes(2)
+
+    const { hash: hashB, fee: sentFeeB } = await account0.sendTransaction(TX_B)
+    await waitForTx(hashB, account0)
+
+    expect(quoteSpy).toHaveBeenCalledTimes(2)
+    expect(sentFeeA).toBe(feeA)
+    expect(sentFeeB).toBe(feeB)
+    quoteSpy.mockRestore()
   }, TIMEOUT)
 })

@@ -18,7 +18,7 @@ import { Contract } from 'ethers'
 
 import { WalletAccountEvm } from '@tetherto/wdk-wallet-evm'
 
-import { AbstractionKitError } from 'abstractionkit'
+import { AbstractionKitError, fetchAccountNonce } from 'abstractionkit'
 
 import WalletAccountReadOnlyEvmErc4337, { FEE_TOLERANCE_COEFFICIENT } from './wallet-account-read-only-evm-erc-4337.js'
 
@@ -30,7 +30,6 @@ import WalletAccountReadOnlyEvmErc4337, { FEE_TOLERANCE_COEFFICIENT } from './wa
  * @typedef {Object} TransactionQuote
  * @property {bigint} fee - The estimated fee with tolerance buffer applied.
  * @property {number} createdAt - The timestamp when the quote was created.
- * @property {string} txKey - A serialized key of the transaction used for cache matching.
  * @property {UserOperationV7} [userOp] - The built UserOperation, reusable by sendTransaction.
  * @property {SafeAccountV0_3_0} [smartAccount] - The smart account instance used to build the UserOperation.
  * @property {bigint} [chainId] - The chain id captured at quote time, used to sign the cached UserOperation for the right network.
@@ -220,7 +219,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     const txKey = WalletAccountEvmErc4337._getTxKey(tx)
 
     if (mergedConfig.isSponsored) {
-      this._quoteCache.set(txKey, { fee: 0n, createdAt: Date.now(), txKey })
+      this._quoteCache.set(txKey, { fee: 0n, createdAt: Date.now() })
       return { fee: 0n }
     }
 
@@ -231,7 +230,6 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     this._quoteCache.set(txKey, {
       fee,
       createdAt: Date.now(),
-      txKey,
       userOp: gasCostResult.userOp,
       smartAccount: gasCostResult.smartAccount,
       chainId: gasCostResult.chainId
@@ -264,7 +262,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
 
     const hash = await this._sendUserOperation([tx].flat(), { config: mergedConfig, cachedBuild: cached })
 
-    this._quoteCache.clear()
+    await this._bumpCachedNonces()
 
     return { hash, fee }
   }
@@ -301,7 +299,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
 
     const hash = await this._sendUserOperation([tx], { config: mergedConfig, cachedBuild: cached })
 
-    this._quoteCache.clear()
+    await this._bumpCachedNonces()
 
     return { hash, fee }
   }
@@ -324,6 +322,37 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
    */
   dispose () {
     this._ownerAccount.dispose()
+  }
+
+  /** @private */
+  async _bumpCachedNonces () {
+    const entriesWithUserOp = [...this._quoteCache.entries()].filter(([, { userOp }]) => userOp)
+
+    if (entriesWithUserOp.length === 0) return
+
+    const [, firstQuote] = entriesWithUserOp[0]
+    const onChainNonce = await fetchAccountNonce(this._provider, firstQuote.smartAccount.entrypointAddress, firstQuote.smartAccount.accountAddress)
+
+    const mode = WalletAccountReadOnlyEvmErc4337._resolvePaymasterMode(this._config)
+
+    await Promise.all(entriesWithUserOp.map(async ([txKey, quote]) => {
+      quote.userOp.nonce = onChainNonce + 1n
+
+      if (mode !== 'native') {
+        try {
+          const { userOp } = await this._applyPaymasterToUserOp({
+            mode,
+            smartAccount: quote.smartAccount,
+            userOp: quote.userOp,
+            config: this._config,
+            chainId: quote.chainId
+          })
+          quote.userOp = userOp
+        } catch {
+          this._quoteCache.delete(txKey)
+        }
+      }
+    }))
   }
 
   /** @private */
