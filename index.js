@@ -21,6 +21,10 @@
 
 /** @typedef {import('@tetherto/wdk-wallet-evm').KeyPair} KeyPair */
 /** @typedef {import('./src/wallet-account-read-only-evm-erc-4337.js').EvmErc4337Transaction} EvmErc4337Transaction */
+/**
+ * @deprecated Use {@link EvmErc4337Transaction} instead.
+ * @typedef {EvmErc4337Transaction} EvmTransaction
+ */
 /** @typedef {import('@tetherto/wdk-wallet-evm').TransactionResult} TransactionResult */
 /** @typedef {import('@tetherto/wdk-wallet-evm').TransferOptions} TransferOptions */
 /** @typedef {import('@tetherto/wdk-wallet-evm').TransferResult} TransferResult */
