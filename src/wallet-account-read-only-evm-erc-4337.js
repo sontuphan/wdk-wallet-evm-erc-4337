@@ -85,7 +85,7 @@ export const FEE_TOLERANCE_COEFFICIENT = 120n
  * @property {string} to - The call's recipient.
  * @property {number | bigint} value - The amount of native coin to send to the recipient (in wei).
  * @property {string} [data] - The call's data in hex format.
- * @property {number | bigint} [callGasLimit] - Override for the UserOperation's callGasLimit.
+ * @property {number | bigint} [callGasLimit] - If set, overrides the user operations' call gas limit.
  * @property {number | bigint} [verificationGasLimit] - Override for the UserOperation's verificationGasLimit.
  * @property {number | bigint} [preVerificationGas] - Override for the UserOperation's preVerificationGas.
  * @property {number | bigint} [maxFeePerGas] - Override for the UserOperation's maxFeePerGas (EIP-1559 cap). When unset, falls back to the bundler-fetched gas price.
