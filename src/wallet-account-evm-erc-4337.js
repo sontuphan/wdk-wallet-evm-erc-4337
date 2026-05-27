@@ -154,11 +154,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
       this._validateConfig(mergedConfig)
     }
 
-    let cached = this._consumeCachedQuote(tx)
-    if (!cached) {
-      await this.quoteSendTransaction(tx, config)
-      cached = this._consumeCachedQuote(tx)
-    }
+    const cached = await this._resolveQuote(tx, config, mergedConfig)
 
     const { userOp } = await this._signUserOperation([tx], { config: mergedConfig, cachedBuild: cached })
 
@@ -256,17 +252,11 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
       this._validateConfig(mergedConfig)
     }
 
-    let cached = this._consumeCachedQuote(tx)
-    if (!cached) {
-      await this.quoteSendTransaction(tx, config)
-      cached = this._consumeCachedQuote(tx)
-    }
+    const cached = await this._resolveQuote(tx, config, mergedConfig)
 
     const fee = cached.fee
 
     const hash = await this._sendUserOperation([tx].flat(), { config: mergedConfig, cachedBuild: cached })
-
-    await this._bumpCachedNonces()
 
     return { hash, fee }
   }
@@ -289,11 +279,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
 
     const tx = await WalletAccountEvm._getTransferTransaction(options)
 
-    let cached = this._consumeCachedQuote(tx)
-    if (!cached) {
-      await this.quoteSendTransaction(tx, config)
-      cached = this._consumeCachedQuote(tx)
-    }
+    const cached = await this._resolveQuote(tx, config, mergedConfig)
 
     const fee = cached.fee
 
@@ -302,8 +288,6 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     }
 
     const hash = await this._sendUserOperation([tx], { config: mergedConfig, cachedBuild: cached })
-
-    await this._bumpCachedNonces()
 
     return { hash, fee }
   }
@@ -328,35 +312,94 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     this._ownerAccount.dispose()
   }
 
-  /** @private */
-  async _bumpCachedNonces () {
-    const entriesWithUserOp = [...this._quoteCache.entries()].filter(([, { userOp }]) => userOp)
+  /**
+   * Consumes a cached quote for the given transaction, refreshing its nonce
+   * against the current on-chain value before reuse. Falls back to a fresh
+   * quote when there is no live cache entry, or when refreshing a stale one
+   * fails — the cache is only an optimization and must never make a send fail
+   * when a fresh quote would succeed.
+   *
+   * @private
+   * @param {EvmTransaction | EvmTransaction[]} tx - The transaction(s) the quote is for.
+   * @param {Partial<EvmErc4337WalletPaymasterTokenConfig | EvmErc4337WalletSponsorshipPolicyConfig | EvmErc4337WalletNativeCoinsConfig>} [config] - The per-call config overrides, forwarded to a fresh quote on a miss.
+   * @param {EvmErc4337WalletConfig} mergedConfig - The base config merged with the per-call overrides, used to rebind a cached operation.
+   * @returns {Promise<TransactionQuote>} A quote whose UserOperation (when present) carries the current nonce.
+   */
+  async _resolveQuote (tx, config, mergedConfig) {
+    let cached = this._consumeCachedQuote(tx)
 
-    if (entriesWithUserOp.length === 0) return
+    if (cached?.userOp) {
+      cached = await this._rebindCachedQuoteNonce(cached, mergedConfig)
+    }
 
-    const [, firstQuote] = entriesWithUserOp[0]
-    const onChainNonce = await fetchAccountNonce(this._provider, firstQuote.smartAccount.entrypointAddress, firstQuote.smartAccount.accountAddress)
+    if (!cached) {
+      await this.quoteSendTransaction(tx, config)
+      cached = this._consumeCachedQuote(tx)
+    }
 
-    const mode = WalletAccountReadOnlyEvmErc4337._resolvePaymasterMode(this._config)
+    return cached
+  }
 
-    await Promise.all(entriesWithUserOp.map(async ([txKey, quote]) => {
-      quote.userOp.nonce = onChainNonce + 1n
+  /**
+   * Re-points a cached UserOperation at the current on-chain nonce, as late as
+   * possible (at consume time, not eagerly after the previous send). Reading the
+   * nonce here keeps us correct when an external client — or another instance of
+   * this wallet — has advanced the account's nonce. When the nonce is unchanged
+   * the cached operation is reused as-is (no paymaster round-trip); otherwise the
+   * paymaster is re-applied for the new nonce and the fee is recomputed from the
+   * fresh quote.
+   *
+   * @private
+   * @param {TransactionQuote} cached - The cached quote, guaranteed to have a `userOp`.
+   * @param {EvmErc4337WalletConfig} config - The merged config the send will use.
+   * @returns {Promise<TransactionQuote | null>} The refreshed quote, or null if the refresh failed and the caller should re-quote.
+   */
+  async _rebindCachedQuoteNonce (cached, config) {
+    try {
+      const onChainNonce = await fetchAccountNonce(
+        this._provider,
+        cached.smartAccount.entrypointAddress,
+        cached.smartAccount.accountAddress
+      )
 
-      if (mode !== 'native') {
-        try {
-          const { userOp } = await this._applyPaymasterToUserOp({
-            mode,
-            smartAccount: quote.smartAccount,
-            userOp: quote.userOp,
-            config: this._config,
-            chainId: quote.chainId
-          })
-          quote.userOp = userOp
-        } catch {
-          this._quoteCache.delete(txKey)
-        }
+      if (cached.userOp.nonce === onChainNonce) {
+        return cached
       }
-    }))
+
+      cached.userOp.nonce = onChainNonce
+
+      // Once the account is deployed (its EntryPoint nonce has advanced past 0),
+      // a quote built while it was still counterfactual carries factory /
+      // factoryData that the EntryPoint would now reject (AA10 "sender already
+      // constructed"). Drop them so the rebound operation targets the deployed
+      // account rather than trying to deploy it again.
+      if (onChainNonce > 0n && cached.userOp.factory != null) {
+        cached.userOp.factory = null
+        cached.userOp.factoryData = null
+      }
+
+      const mode = WalletAccountReadOnlyEvmErc4337._resolvePaymasterMode(config)
+      if (mode === 'native') {
+        return cached
+      }
+
+      const { userOp, tokenQuote } = await this._applyPaymasterToUserOp({
+        mode,
+        smartAccount: cached.smartAccount,
+        userOp: cached.userOp,
+        config,
+        chainId: cached.chainId
+      })
+
+      cached.userOp = userOp
+      if (tokenQuote) {
+        cached.fee = BigInt(tokenQuote.tokenCost) * FEE_TOLERANCE_COEFFICIENT / 100n
+      }
+
+      return cached
+    } catch {
+      return null
+    }
   }
 
   /** @private */
