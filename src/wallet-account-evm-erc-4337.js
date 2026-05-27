@@ -312,19 +312,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     this._ownerAccount.dispose()
   }
 
-  /**
-   * Consumes a cached quote for the given transaction, refreshing its nonce
-   * against the current on-chain value before reuse. Falls back to a fresh
-   * quote when there is no live cache entry, or when refreshing a stale one
-   * fails — the cache is only an optimization and must never make a send fail
-   * when a fresh quote would succeed.
-   *
-   * @private
-   * @param {EvmTransaction | EvmTransaction[]} tx - The transaction(s) the quote is for.
-   * @param {Partial<EvmErc4337WalletPaymasterTokenConfig | EvmErc4337WalletSponsorshipPolicyConfig | EvmErc4337WalletNativeCoinsConfig>} [config] - The per-call config overrides, forwarded to a fresh quote on a miss.
-   * @param {EvmErc4337WalletConfig} mergedConfig - The base config merged with the per-call overrides, used to rebind a cached operation.
-   * @returns {Promise<TransactionQuote>} A quote whose UserOperation (when present) carries the current nonce.
-   */
+  /** @private */
   async _resolveQuote (tx, config, mergedConfig) {
     let cached = this._consumeCachedQuote(tx)
 
@@ -340,20 +328,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     return cached
   }
 
-  /**
-   * Re-points a cached UserOperation at the current on-chain nonce, as late as
-   * possible (at consume time, not eagerly after the previous send). Reading the
-   * nonce here keeps us correct when an external client — or another instance of
-   * this wallet — has advanced the account's nonce. When the nonce is unchanged
-   * the cached operation is reused as-is (no paymaster round-trip); otherwise the
-   * paymaster is re-applied for the new nonce and the fee is recomputed from the
-   * fresh quote.
-   *
-   * @private
-   * @param {TransactionQuote} cached - The cached quote, guaranteed to have a `userOp`.
-   * @param {EvmErc4337WalletConfig} config - The merged config the send will use.
-   * @returns {Promise<TransactionQuote | null>} The refreshed quote, or null if the refresh failed and the caller should re-quote.
-   */
+  /** @private */
   async _rebindCachedQuoteNonce (cached, config) {
     try {
       const onChainNonce = await fetchAccountNonce(
@@ -368,11 +343,6 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
 
       cached.userOp.nonce = onChainNonce
 
-      // Once the account is deployed (its EntryPoint nonce has advanced past 0),
-      // a quote built while it was still counterfactual carries factory /
-      // factoryData that the EntryPoint would now reject (AA10 "sender already
-      // constructed"). Drop them so the rebound operation targets the deployed
-      // account rather than trying to deploy it again.
       if (onChainNonce > 0n && cached.userOp.factory != null) {
         cached.userOp.factory = null
         cached.userOp.factoryData = null

@@ -655,10 +655,6 @@ describe('@wdk/wallet-evm-erc-4337', () => {
 
     const { hash, fee: transferFee } = await account0.transfer(TRANSFER)
     await waitForTx(hash, account0)
-    // Cached build is reused (no re-quote -> quoteSpy stays at 2), but because a
-    // tx mined in between, the nonce is rebound and the paymaster re-applied, so
-    // the fee is refreshed to match the operation actually sent rather than the
-    // now-stale original quote.
     expect(quoteSpy).toHaveBeenCalledTimes(2)
     expect(transferFee).toBeGreaterThan(0n)
 
@@ -717,10 +713,6 @@ describe('@wdk/wallet-evm-erc-4337', () => {
     const { hash: hashB, fee: sentFeeB } = await account0.sendTransaction(TX_B)
     await waitForTx(hashB, account0)
 
-    // Neither send re-quotes (quoteSpy stays at 2). TX_A is sent first with the
-    // nonce unchanged since its quote, so its cached build — and fee — are reused
-    // as-is. TX_B's nonce moved once TX_A mined, so it is rebound and its fee is
-    // refreshed to match the operation actually sent.
     expect(quoteSpy).toHaveBeenCalledTimes(2)
     expect(sentFeeA).toBe(feeA)
     expect(sentFeeB).toBeGreaterThan(0n)
