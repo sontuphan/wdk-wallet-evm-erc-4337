@@ -154,7 +154,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
       this._validateConfig(mergedConfig)
     }
 
-    const cached = await this._resolveQuote(tx, config, mergedConfig)
+    const { quote: cached } = await this._resolveQuote(tx, config, mergedConfig)
 
     const { userOp } = await this._signUserOperation([tx], { config: mergedConfig, cachedBuild: cached })
 
@@ -252,13 +252,22 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
       this._validateConfig(mergedConfig)
     }
 
-    const cached = await this._resolveQuote(tx, config, mergedConfig)
+    const resolved = await this._resolveQuote(tx, config, mergedConfig)
+    let quote = resolved.quote
 
-    const fee = cached.fee
+    try {
+      const hash = await this._sendUserOperation([tx].flat(), { config: mergedConfig, cachedBuild: quote })
+      return { hash, fee: quote.fee }
+    } catch (error) {
+      if (!resolved.fromCache || !WalletAccountEvmErc4337._isRetriableSendError(error)) {
+        throw error
+      }
 
-    const hash = await this._sendUserOperation([tx].flat(), { config: mergedConfig, cachedBuild: cached })
+      quote = await this._freshQuote(tx, config)
 
-    return { hash, fee }
+      const hash = await this._sendUserOperation([tx].flat(), { config: mergedConfig, cachedBuild: quote })
+      return { hash, fee: quote.fee }
+    }
   }
 
   /**
@@ -279,17 +288,30 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
 
     const tx = await WalletAccountEvm._getTransferTransaction(options)
 
-    const cached = await this._resolveQuote(tx, config, mergedConfig)
+    const resolved = await this._resolveQuote(tx, config, mergedConfig)
+    let quote = resolved.quote
 
-    const fee = cached.fee
-
-    if (!isSponsored && transferMaxFee !== undefined && fee >= transferMaxFee) {
+    if (!isSponsored && transferMaxFee !== undefined && quote.fee >= transferMaxFee) {
       throw new Error('Exceeded maximum fee cost for transfer operation.')
     }
 
-    const hash = await this._sendUserOperation([tx], { config: mergedConfig, cachedBuild: cached })
+    try {
+      const hash = await this._sendUserOperation([tx], { config: mergedConfig, cachedBuild: quote })
+      return { hash, fee: quote.fee }
+    } catch (error) {
+      if (!resolved.fromCache || !WalletAccountEvmErc4337._isRetriableSendError(error)) {
+        throw error
+      }
 
-    return { hash, fee }
+      quote = await this._freshQuote(tx, config)
+
+      if (!isSponsored && transferMaxFee !== undefined && quote.fee >= transferMaxFee) {
+        throw new Error('Exceeded maximum fee cost for transfer operation.')
+      }
+
+      const hash = await this._sendUserOperation([tx], { config: mergedConfig, cachedBuild: quote })
+      return { hash, fee: quote.fee }
+    }
   }
 
   /**
@@ -322,10 +344,29 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
 
     if (!cached) {
       await this.quoteSendTransaction(tx, config)
-      cached = this._consumeCachedQuote(tx)
+      return { quote: this._consumeCachedQuote(tx), fromCache: false }
     }
 
-    return cached
+    return { quote: cached, fromCache: cached.userOp != null }
+  }
+
+  /** @private */
+  async _freshQuote (tx, config) {
+    await this.quoteSendTransaction(tx, config)
+    return this._consumeCachedQuote(tx)
+  }
+
+  /** @private */
+  static _isRetriableSendError (error) {
+    if (!(error instanceof AbstractionKitError)) return false
+
+    const message = `${error.message ?? ''} ${error.cause?.message ?? ''}`.toLowerCase()
+
+    return [
+      'aa10', 'aa13', 'aa14', 'aa22', 'aa23', 'aa24', 'aa25', 'aa26',
+      'nonce', 'already known', 'replacement underpriced', 'underpriced',
+      'fee too low', 'sender already constructed'
+    ].some(marker => message.includes(marker))
   }
 
   /** @private */

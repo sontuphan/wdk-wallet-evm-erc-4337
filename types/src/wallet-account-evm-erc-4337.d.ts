@@ -113,6 +113,10 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     /** @private */
     private _rebindCachedQuoteNonce;
     /** @private */
+    private _freshQuote;
+    /** @private */
+    private static _isRetriableSendError;
+    /** @private */
     private static _getTxKey;
     /** @private */
     private _consumeCachedQuote;
