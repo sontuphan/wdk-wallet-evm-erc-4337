@@ -18,7 +18,7 @@ import { Contract } from 'ethers'
 
 import { WalletAccountEvm } from '@tetherto/wdk-wallet-evm'
 
-import { AbstractionKitError, fetchAccountNonce } from 'abstractionkit'
+import { AbstractionKitError, ENTRYPOINT_V7, fetchAccountNonce } from 'abstractionkit'
 
 import WalletAccountReadOnlyEvmErc4337, { FEE_TOLERANCE_COEFFICIENT } from './wallet-account-read-only-evm-erc-4337.js'
 
@@ -87,6 +87,12 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
      * @type {Map<string, TransactionQuote>}
      */
     this._quoteCache = new Map()
+
+    /** @private */
+    this._nextNonce = undefined
+
+    /** @private */
+    this._nonceLock = Promise.resolve()
   }
 
   /**
@@ -154,9 +160,10 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
       this._validateConfig(mergedConfig)
     }
 
-    const { quote: cached } = await this._resolveQuote(tx, config, mergedConfig)
+    const { quote } = await this._resolveQuote(tx, config)
+    const prepared = await this._prepareForSubmit(quote, [tx], mergedConfig)
 
-    const { userOp } = await this._signUserOperation([tx], { config: mergedConfig, cachedBuild: cached })
+    const { userOp } = await this._signUserOperation([tx], { config: mergedConfig, cachedBuild: prepared })
 
     this._quoteCache.clear()
 
@@ -252,21 +259,29 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
       this._validateConfig(mergedConfig)
     }
 
-    const resolved = await this._resolveQuote(tx, config, mergedConfig)
-    let quote = resolved.quote
+    const txs = [tx].flat()
+    const resolved = await this._resolveQuote(tx, config)
+    let prepared = await this._prepareForSubmit(resolved.quote, txs, mergedConfig)
 
     try {
-      const hash = await this._sendUserOperation([tx].flat(), { config: mergedConfig, cachedBuild: quote })
-      return { hash, fee: quote.fee }
+      const hash = await this._sendUserOperation(txs, { config: mergedConfig, cachedBuild: prepared })
+      return { hash, fee: prepared.fee }
     } catch (error) {
+      this._maybeResyncOnRejection(error)
       if (!resolved.fromCache || !WalletAccountEvmErc4337._isRetriableSendError(error)) {
         throw error
       }
 
-      quote = await this._freshQuote(tx, config)
+      const fresh = await this._freshQuote(tx, config)
+      prepared = await this._prepareForSubmit(fresh, txs, mergedConfig)
 
-      const hash = await this._sendUserOperation([tx].flat(), { config: mergedConfig, cachedBuild: quote })
-      return { hash, fee: quote.fee }
+      try {
+        const hash = await this._sendUserOperation(txs, { config: mergedConfig, cachedBuild: prepared })
+        return { hash, fee: prepared.fee }
+      } catch (retryError) {
+        this._maybeResyncOnRejection(retryError)
+        throw retryError
+      }
     }
   }
 
@@ -288,29 +303,39 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
 
     const tx = await WalletAccountEvm._getTransferTransaction(options)
 
-    const resolved = await this._resolveQuote(tx, config, mergedConfig)
-    let quote = resolved.quote
+    const txs = [tx]
+    const resolved = await this._resolveQuote(tx, config)
+    let prepared = await this._prepareForSubmit(resolved.quote, txs, mergedConfig)
 
-    if (!isSponsored && transferMaxFee !== undefined && quote.fee >= transferMaxFee) {
+    if (!isSponsored && transferMaxFee !== undefined && prepared.fee >= transferMaxFee) {
+      this._nextNonce = undefined
       throw new Error('Exceeded maximum fee cost for transfer operation.')
     }
 
     try {
-      const hash = await this._sendUserOperation([tx], { config: mergedConfig, cachedBuild: quote })
-      return { hash, fee: quote.fee }
+      const hash = await this._sendUserOperation(txs, { config: mergedConfig, cachedBuild: prepared })
+      return { hash, fee: prepared.fee }
     } catch (error) {
+      this._maybeResyncOnRejection(error)
       if (!resolved.fromCache || !WalletAccountEvmErc4337._isRetriableSendError(error)) {
         throw error
       }
 
-      quote = await this._freshQuote(tx, config)
+      const fresh = await this._freshQuote(tx, config)
+      prepared = await this._prepareForSubmit(fresh, txs, mergedConfig)
 
-      if (!isSponsored && transferMaxFee !== undefined && quote.fee >= transferMaxFee) {
+      if (!isSponsored && transferMaxFee !== undefined && prepared.fee >= transferMaxFee) {
+        this._nextNonce = undefined
         throw new Error('Exceeded maximum fee cost for transfer operation.')
       }
 
-      const hash = await this._sendUserOperation([tx], { config: mergedConfig, cachedBuild: quote })
-      return { hash, fee: quote.fee }
+      try {
+        const hash = await this._sendUserOperation(txs, { config: mergedConfig, cachedBuild: prepared })
+        return { hash, fee: prepared.fee }
+      } catch (retryError) {
+        this._maybeResyncOnRejection(retryError)
+        throw retryError
+      }
     }
   }
 
@@ -335,19 +360,87 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
   }
 
   /** @private */
-  async _resolveQuote (tx, config, mergedConfig) {
+  async _resolveQuote (tx, config) {
     let cached = this._consumeCachedQuote(tx)
-
-    if (cached?.userOp) {
-      cached = await this._rebindCachedQuoteNonce(cached, mergedConfig)
-    }
 
     if (!cached) {
       await this.quoteSendTransaction(tx, config)
-      return { quote: this._consumeCachedQuote(tx), fromCache: false }
+      cached = this._consumeCachedQuote(tx)
+      return { quote: cached, fromCache: false }
     }
 
     return { quote: cached, fromCache: cached.userOp != null }
+  }
+
+  /** @private */
+  async _allocateNonce () {
+    const prev = this._nonceLock
+    let release = () => {}
+    this._nonceLock = new Promise(resolve => { release = resolve })
+    try {
+      await prev
+      const onChain = await fetchAccountNonce(this._provider, this._config.entryPointAddress ?? ENTRYPOINT_V7, this._address)
+      const next = this._nextNonce !== undefined && this._nextNonce > onChain ? this._nextNonce : onChain
+      this._nextNonce = next + 1n
+      return next
+    } finally {
+      release()
+    }
+  }
+
+  /** @private */
+  _maybeResyncOnRejection (error) {
+    if (WalletAccountEvmErc4337._isPreAcceptanceError(error)) {
+      this._nextNonce = undefined
+    }
+  }
+
+  /** @private */
+  async _prepareForSubmit (quote, txs, mergedConfig) {
+    const allocatedNonce = await this._allocateNonce()
+    try {
+      return await this._prepareForSend(quote, txs, allocatedNonce, mergedConfig)
+    } catch (error) {
+      this._nextNonce = undefined
+      throw error
+    }
+  }
+
+  /** @private */
+  async _prepareForSend (quote, txs, allocatedNonce, mergedConfig) {
+    if (quote.userOp && quote.userOp.nonce === allocatedNonce) {
+      return quote
+    }
+    if (quote.userOp) {
+      return await this._rebindCachedQuoteNonce(quote, allocatedNonce, mergedConfig)
+    }
+    return await this._buildAtNonce(quote, txs, allocatedNonce, mergedConfig)
+  }
+
+  /** @private */
+  async _buildAtNonce (quote, txs, allocatedNonce, config) {
+    const result = await this._buildUserOperation(WalletAccountReadOnlyEvmErc4337._toMetaTransactions(txs), config)
+
+    if (result.userOp.nonce !== allocatedNonce) {
+      result.userOp.nonce = allocatedNonce
+      if (allocatedNonce > 0n && result.userOp.factory != null) {
+        result.userOp.factory = null
+        result.userOp.factoryData = null
+      }
+      const mode = WalletAccountReadOnlyEvmErc4337._resolvePaymasterMode(config)
+      if (mode !== 'native') {
+        const reapplied = await this._applyPaymasterToUserOp({
+          mode,
+          smartAccount: result.smartAccount,
+          userOp: result.userOp,
+          config,
+          chainId: result.chainId
+        })
+        result.userOp = reapplied.userOp
+      }
+    }
+
+    return { ...quote, userOp: result.userOp, smartAccount: result.smartAccount, chainId: result.chainId }
   }
 
   /** @private */
@@ -370,47 +463,47 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
   }
 
   /** @private */
-  async _rebindCachedQuoteNonce (cached, config) {
-    try {
-      const onChainNonce = await fetchAccountNonce(
-        this._provider,
-        cached.smartAccount.entrypointAddress,
-        cached.smartAccount.accountAddress
-      )
+  async _rebindCachedQuoteNonce (cached, allocatedNonce, config) {
+    cached.userOp.nonce = allocatedNonce
 
-      if (cached.userOp.nonce === onChainNonce) {
-        return cached
-      }
-
-      cached.userOp.nonce = onChainNonce
-
-      if (onChainNonce > 0n && cached.userOp.factory != null) {
-        cached.userOp.factory = null
-        cached.userOp.factoryData = null
-      }
-
-      const mode = WalletAccountReadOnlyEvmErc4337._resolvePaymasterMode(config)
-      if (mode === 'native') {
-        return cached
-      }
-
-      const { userOp, tokenQuote } = await this._applyPaymasterToUserOp({
-        mode,
-        smartAccount: cached.smartAccount,
-        userOp: cached.userOp,
-        config,
-        chainId: cached.chainId
-      })
-
-      cached.userOp = userOp
-      if (tokenQuote) {
-        cached.fee = BigInt(tokenQuote.tokenCost) * FEE_TOLERANCE_COEFFICIENT / 100n
-      }
-
-      return cached
-    } catch {
-      return null
+    if (allocatedNonce > 0n && cached.userOp.factory != null) {
+      cached.userOp.factory = null
+      cached.userOp.factoryData = null
     }
+
+    const mode = WalletAccountReadOnlyEvmErc4337._resolvePaymasterMode(config)
+    if (mode === 'native') {
+      return cached
+    }
+
+    const { userOp, tokenQuote } = await this._applyPaymasterToUserOp({
+      mode,
+      smartAccount: cached.smartAccount,
+      userOp: cached.userOp,
+      config,
+      chainId: cached.chainId
+    })
+
+    cached.userOp = userOp
+    if (tokenQuote) {
+      cached.fee = BigInt(tokenQuote.tokenCost) * FEE_TOLERANCE_COEFFICIENT / 100n
+    }
+
+    return cached
+  }
+
+  /** @private */
+  static _isPreAcceptanceError (error) {
+    if (error instanceof AbstractionKitError) {
+      const message = `${error.message ?? ''} ${error.cause?.message ?? ''}`.toLowerCase()
+      return [
+        'aa10', 'aa13', 'aa14', 'aa21', 'aa22', 'aa23', 'aa24', 'aa25', 'aa26',
+        'aa31', 'aa32', 'aa33', 'aa34', 'aa40', 'aa41', 'aa50', 'aa51',
+        'nonce', 'already known', 'replacement underpriced', 'underpriced',
+        'fee too low', 'sender already constructed'
+      ].some(marker => message.includes(marker))
+    }
+    return typeof error?.message === 'string' && error.message.includes('Not enough funds')
   }
 
   /** @private */

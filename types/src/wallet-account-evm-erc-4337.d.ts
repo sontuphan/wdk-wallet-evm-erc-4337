@@ -19,6 +19,10 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     private _ownerAccount;
     /** @private */
     private _quoteCache;
+    /** @private */
+    private _nextNonce;
+    /** @private */
+    private _nonceLock;
     /**
      * The derivation path's index of this account.
      *
@@ -111,11 +115,21 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     /** @private */
     private _resolveQuote;
     /** @private */
+    private _allocateNonce;
+    /** @private */
+    private _maybeResyncOnRejection;
+    /** @private */
+    private _prepareForSend;
+    /** @private */
+    private _buildAtNonce;
+    /** @private */
     private _rebindCachedQuoteNonce;
     /** @private */
     private _freshQuote;
     /** @private */
     private static _isRetriableSendError;
+    /** @private */
+    private static _isPreAcceptanceError;
     /** @private */
     private static _getTxKey;
     /** @private */

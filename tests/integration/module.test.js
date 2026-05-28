@@ -718,4 +718,27 @@ describe('@wdk/wallet-evm-erc-4337', () => {
     expect(sentFeeB).toBeGreaterThan(0n)
     quoteSpy.mockRestore()
   }, TIMEOUT)
+
+  test('should send two concurrent transactions with sequential nonces', async () => {
+    const account0 = await wallet.getAccountByPath("0'/0/0")
+    account0._quoteCache.clear()
+    account0._nextNonce = undefined
+
+    const TX_A = { to: ACCOUNT1.safeAddress, value: 0 }
+    const TX_B = { to: ACCOUNT0.safeAddress, value: 0 }
+
+    const [resA, resB] = await Promise.all([
+      account0.sendTransaction(TX_A),
+      account0.sendTransaction(TX_B)
+    ])
+
+    const [receiptA, receiptB] = await Promise.all([
+      waitForTx(resA.hash, account0),
+      waitForTx(resB.hash, account0)
+    ])
+
+    expect(receiptA.status).toBe(1)
+    expect(receiptB.status).toBe(1)
+    expect(resA.hash).not.toBe(resB.hash)
+  }, TIMEOUT)
 })
