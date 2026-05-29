@@ -741,4 +741,39 @@ describe('@wdk/wallet-evm-erc-4337', () => {
     expect(receiptB.status).toBe(1)
     expect(resA.hash).not.toBe(resB.hash)
   }, TIMEOUT)
+
+  test('should propagate gas overrides to the final signed UserOperation across NATIVE / TOKEN / SPONSORED modes', async () => {
+    const account0 = await wallet.getAccountByPath("0'/0/0")
+
+    const OVERRIDES = {
+      callGasLimit: 250000n,
+      verificationGasLimit: 150000n,
+      preVerificationGas: 50000n,
+      maxFeePerGas: 2_000_000_000n,
+      maxPriorityFeePerGas: 1_500_000_000n
+    }
+
+    const TX = {
+      to: ACCOUNT1.safeAddress,
+      value: 0,
+      data: '0x',
+      ...OVERRIDES
+    }
+
+    const modes = [
+      undefined, // TOKEN (default wallet config)
+      { isSponsored: true, paymasterUrl: 'http://localhost:3000?pimlico' }, // SPONSORED
+      { useNativeCoins: true } // NATIVE
+    ]
+
+    for (const config of modes) {
+      const signedUserOp = await account0.signTransaction(TX, config)
+
+      expect(signedUserOp.callGasLimit).toBe(OVERRIDES.callGasLimit)
+      expect(signedUserOp.verificationGasLimit).toBe(OVERRIDES.verificationGasLimit)
+      expect(signedUserOp.preVerificationGas).toBe(OVERRIDES.preVerificationGas)
+      expect(signedUserOp.maxFeePerGas).toBe(OVERRIDES.maxFeePerGas)
+      expect(signedUserOp.maxPriorityFeePerGas).toBe(OVERRIDES.maxPriorityFeePerGas)
+    }
+  }, TIMEOUT)
 })

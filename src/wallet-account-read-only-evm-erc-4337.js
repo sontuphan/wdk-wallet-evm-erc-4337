@@ -48,7 +48,6 @@ export const FEE_TOLERANCE_COEFFICIENT = 120n
 
 /** @typedef {import('ethers').Eip1193Provider} Eip1193Provider */
 
-/** @typedef {import('@tetherto/wdk-wallet-evm').EvmTransaction} EvmTransaction */
 /** @typedef {import('@tetherto/wdk-wallet-evm').TransactionResult} TransactionResult */
 /** @typedef {import('@tetherto/wdk-wallet-evm').TransferOptions} TransferOptions */
 /** @typedef {import('@tetherto/wdk-wallet-evm').TransferResult} TransferResult */
@@ -68,6 +67,35 @@ export const FEE_TOLERANCE_COEFFICIENT = 120n
  * @property {'native' | 'sponsored' | 'token'} mode - The paymaster mode used to build the operation.
  * @property {bigint} chainId - The chain id captured at build time.
  * @property {TokenQuote} [tokenQuote] - The paymaster token quote, present only in token mode.
+ */
+
+/**
+ * An EVM transaction shape used to build an ERC-4337 UserOperation.
+ *
+ * @typedef {Object} EvmErc4337Transaction
+ * @property {string} to - The call's recipient.
+ * @property {number | bigint} value - The amount of native coin to send to the recipient (in wei).
+ * @property {string} [data] - The call's data in hex format.
+ * @property {number | bigint} [callGasLimit] - If set, overrides the user operations' call gas limit.
+ * @property {number | bigint} [verificationGasLimit] - If set, overrides the user operations' verification gas limit.
+ * @property {number | bigint} [preVerificationGas] - If set, overrides the user operations' pre-verification gas.
+ * @property {number | bigint} [maxFeePerGas] - If set, overrides the user operations' max fee per gas (EIP-1559 cap). Treated as a pair with `maxPriorityFeePerGas`: setting either disables the bundler-fetched fee fallback for both.
+ * @property {number | bigint} [maxPriorityFeePerGas] - If set, overrides the user operations' max priority fee per gas. Treated as a pair with `maxFeePerGas`: setting either disables the bundler-fetched fee fallback for both.
+ */
+
+/**
+ * Gas-related UserOperationV7 overrides, coerced to `bigint`.
+ *
+ * Produced by `_extractGasOverrides` from an `EvmErc4337Transaction` and threaded into
+ * `_buildUserOperation`. All fields are optional; absent fields fall back to the bundler-fetched
+ * gas price (fee pair) or AbstractionKit's gas estimation (gas limits).
+ *
+ * @typedef {Object} EvmErc4337GasOverrides
+ * @property {bigint} [callGasLimit] - Override for the UserOperation's call gas limit.
+ * @property {bigint} [verificationGasLimit] - Override for the UserOperation's verification gas limit.
+ * @property {bigint} [preVerificationGas] - Override for the UserOperation's pre-verification gas.
+ * @property {bigint} [maxFeePerGas] - Override for the UserOperation's max fee per gas (EIP-1559 cap).
+ * @property {bigint} [maxPriorityFeePerGas] - Override for the UserOperation's max priority fee per gas.
  */
 
 /**
@@ -268,7 +296,10 @@ export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOn
    * The result is cached internally for up to 2 minutes. If `sendTransaction` is called with the
    * same transaction within that window, the cached fee is reused without an additional RPC round-trip.
    *
-   * @param {EvmTransaction | EvmTransaction[]} tx - The transaction, or an array of multiple transactions to send in batch.
+   * In a batched call (`tx` passed as `[tx1, tx2, ...]`), only the gas overrides on `tx1` are
+   * honored — a UserOperation has a single set of gas fields regardless of how many calls it batches.
+   *
+   * @param {EvmErc4337Transaction | EvmErc4337Transaction[]} tx - The transaction, or an array of multiple transactions to send in batch.
    * @param {Partial<EvmErc4337WalletPaymasterTokenConfig | EvmErc4337WalletSponsorshipPolicyConfig | EvmErc4337WalletNativeCoinsConfig>} [config] - If set, overrides the given configuration options.
    * @returns {Promise<Omit<TransactionResult, 'hash'>>} The transaction's quotes.
    * @throws {ConfigurationError} If the override `config` is invalid or has missing required fields.
@@ -541,7 +572,7 @@ export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOn
    * Converts EVM transactions to AbstractionKit MetaTransaction calls.
    *
    * @protected
-   * @param {EvmTransaction[]} txs - The transactions to convert.
+   * @param {EvmErc4337Transaction[]} txs - The transactions to convert.
    * @returns {MetaTransaction[]} The calls array for createUserOperation.
    */
   static _toMetaTransactions (txs) {
@@ -585,9 +616,10 @@ export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOn
    * @protected
    * @param {MetaTransaction[]} calls - The meta-transactions to include in the UserOperation.
    * @param {Omit<EvmErc4337WalletConfig, 'transferMaxFee'>} config - The wallet configuration.
+   * @param {EvmErc4337GasOverrides} [txOverrides] - Optional UserOperationV7 gas overrides extracted from the input transaction(s).
    * @returns {Promise<BuiltUserOperation>} The built operation, signing context, and (in token mode) the paymaster quote.
    */
-  async _buildUserOperation (calls, config) {
+  async _buildUserOperation (calls, config, txOverrides = {}) {
     const smartAccount = await this._getSmartAccount(config)
     const chainId = await this._getChainId()
 
@@ -598,18 +630,45 @@ export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOn
 
     const gasPrice = await this._fetchBundlerGasPrice(config.bundlerUrl)
 
+    const feePairOverridden = txOverrides.maxFeePerGas !== undefined || txOverrides.maxPriorityFeePerGas !== undefined
+    const overrides = feePairOverridden
+      ? { ...txOverrides }
+      : { ...gasPrice, ...txOverrides }
+
     const baseUserOp = (mode === PaymasterMode.NATIVE || provider === 'candide')
-      ? await smartAccount.createUserOperation(calls, this._provider, config.bundlerUrl, gasPrice)
-      : await smartAccount.createUserOperation(calls, this._provider, undefined, { skipGasEstimation: true, ...gasPrice })
+      ? await smartAccount.createUserOperation(calls, this._provider, config.bundlerUrl, overrides)
+      : await smartAccount.createUserOperation(calls, this._provider, undefined, { skipGasEstimation: true, ...overrides })
 
     if (mode === PaymasterMode.NATIVE) {
       return { userOp: baseUserOp, smartAccount, mode, chainId }
     }
 
     const { userOp, tokenQuote } = await this._applyPaymasterToUserOp({
-      mode, smartAccount, userOp: baseUserOp, config, chainId
+      mode, smartAccount, userOp: baseUserOp, config, chainId, txOverrides
     })
     return { userOp, smartAccount, mode, chainId, tokenQuote }
+  }
+
+  /**
+   * Extracts the optional UserOperationV7 gas overrides from a single transaction.
+   *
+   * Only the fields actually consumed by AbstractionKit's `CreateUserOperationOverrides`
+   * are picked. Numeric values are coerced to bigint.
+   *
+   * @protected
+   * @param {EvmErc4337Transaction} [tx] - The transaction to read overrides from.
+   * @returns {EvmErc4337GasOverrides} The overrides object (empty if `tx` is falsy or has no override fields).
+   */
+  static _extractGasOverrides (tx) {
+    const overrides = {}
+    if (!tx) return overrides
+
+    const fields = ['callGasLimit', 'verificationGasLimit', 'preVerificationGas', 'maxFeePerGas', 'maxPriorityFeePerGas']
+    for (const field of fields) {
+      if (tx[field] !== undefined) overrides[field] = BigInt(tx[field])
+    }
+
+    return overrides
   }
 
   /**
@@ -618,17 +677,21 @@ export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOn
    * Returns the cost in the paymaster token when a token quote is available, otherwise in
    * native wei. Used by `quoteSendTransaction` and reused by `sendTransaction` via the cache.
    *
+   * In a batched call, only `txs[0]`'s gas overrides are honored — a UserOperation
+   * carries a single set of gas fields regardless of how many calls it batches.
+   *
    * @protected
-   * @param {EvmTransaction[]} txs - The EVM transactions to include in the UserOperation.
+   * @param {EvmErc4337Transaction[]} txs - The EVM transactions to include in the UserOperation.
    * @param {Omit<EvmErc4337WalletConfig, 'transferMaxFee'>} config - The wallet configuration to use for the build.
    * @returns {Promise<BuiltUserOperation & Omit<TransactionResult, 'hash'>>} The built operation plus its raw fee (no tolerance buffer applied).
    * @throws {Error} If the token paymaster reports AA50 (account does not hold the paymaster token).
    */
   async _getUserOperationGasCost (txs, config) {
     const calls = WalletAccountReadOnlyEvmErc4337._toMetaTransactions(txs)
+    const txOverrides = WalletAccountReadOnlyEvmErc4337._extractGasOverrides(txs[0])
 
     try {
-      const buildResult = await this._buildUserOperation(calls, config)
+      const buildResult = await this._buildUserOperation(calls, config, txOverrides)
 
       const fee = buildResult.tokenQuote
         ? buildResult.tokenQuote.tokenCost
@@ -677,19 +740,24 @@ export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOn
   }
 
   /** @private */
-  async _applyPaymasterToUserOp ({ mode, smartAccount, userOp, config, chainId }) {
+  async _applyPaymasterToUserOp ({ mode, smartAccount, userOp, config, chainId, txOverrides = {} }) {
     const erc7677 = this._getPaymaster(config.paymasterUrl, { chainId: BigInt(chainId) })
 
     const context = mode === PaymasterMode.TOKEN
       ? { token: config.paymasterToken.address }
       : { sponsorshipPolicyId: config.sponsorshipPolicyId }
 
+    const paymasterOverrides = { entrypoint: ENTRYPOINT_V7 }
+    if (txOverrides.callGasLimit !== undefined) paymasterOverrides.callGasLimit = txOverrides.callGasLimit
+    if (txOverrides.verificationGasLimit !== undefined) paymasterOverrides.verificationGasLimit = txOverrides.verificationGasLimit
+    if (txOverrides.preVerificationGas !== undefined) paymasterOverrides.preVerificationGas = txOverrides.preVerificationGas
+
     const result = await erc7677.createPaymasterUserOperation(
       smartAccount,
       userOp,
       config.bundlerUrl,
       context,
-      { entrypoint: ENTRYPOINT_V7 }
+      paymasterOverrides
     )
 
     return { userOp: result.userOperation, tokenQuote: result.tokenQuote }

@@ -39,12 +39,12 @@ import WalletAccountReadOnlyEvmErc4337, { FEE_TOLERANCE_COEFFICIENT } from './wa
 
 /** @typedef {import('@tetherto/wdk-wallet-evm').KeyPair} KeyPair */
 
-/** @typedef {import('@tetherto/wdk-wallet-evm').EvmTransaction} EvmTransaction */
 /** @typedef {import('@tetherto/wdk-wallet-evm').TransactionResult} TransactionResult */
 /** @typedef {import('@tetherto/wdk-wallet-evm').TransferOptions} TransferOptions */
 /** @typedef {import('@tetherto/wdk-wallet-evm').TransferResult} TransferResult */
 /** @typedef {import('@tetherto/wdk-wallet-evm').ApproveOptions} ApproveOptions */
 
+/** @typedef {import('./wallet-account-read-only-evm-erc-4337.js').EvmErc4337Transaction} EvmErc4337Transaction */
 /** @typedef {import('./wallet-account-read-only-evm-erc-4337.js').EvmErc4337WalletConfig} EvmErc4337WalletConfig */
 /** @typedef {import('./wallet-account-read-only-evm-erc-4337.js').EvmErc4337WalletPaymasterTokenConfig} EvmErc4337WalletPaymasterTokenConfig */
 /** @typedef {import('./wallet-account-read-only-evm-erc-4337.js').EvmErc4337WalletSponsorshipPolicyConfig} EvmErc4337WalletSponsorshipPolicyConfig */
@@ -149,7 +149,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
   /**
    * Signs a user operation built from the given transaction.
    *
-   * @param {EvmTransaction} tx - The transaction to include in the user operation.
+   * @param {EvmErc4337Transaction} tx - The transaction to include in the user operation.
    * @param {Partial<EvmErc4337WalletPaymasterTokenConfig | EvmErc4337WalletSponsorshipPolicyConfig | EvmErc4337WalletNativeCoinsConfig>} [config] - If set, overrides the given configuration options.
    * @returns {Promise<UserOperationV7>} The signed user operation.
    */
@@ -212,7 +212,10 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
    * The result is cached internally for up to 2 minutes. If `sendTransaction` is called with the
    * same transaction within that window, the cached fee is reused without an additional RPC round-trip.
    *
-   * @param {EvmTransaction | EvmTransaction[]} tx - The transaction, or an array of multiple transactions to send in batch.
+   * In a batched call (`tx` passed as `[tx1, tx2, ...]`), only the gas overrides on `tx1` are
+   * honored — a UserOperation has a single set of gas fields regardless of how many calls it batches.
+   *
+   * @param {EvmErc4337Transaction | EvmErc4337Transaction[]} tx - The transaction, or an array of multiple transactions to send in batch.
    * @param {Partial<EvmErc4337WalletPaymasterTokenConfig | EvmErc4337WalletSponsorshipPolicyConfig | EvmErc4337WalletNativeCoinsConfig>} [config] - If set, overrides the given configuration options.
    * @returns {Promise<Omit<TransactionResult, 'hash'>>} The transaction's quotes.
    */
@@ -248,7 +251,10 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
   /**
    * Sends a transaction.
    *
-   * @param {EvmTransaction | EvmTransaction[]} tx -  The transaction, or an array of multiple transactions to send in batch.
+   * In a batched call (`tx` passed as `[tx1, tx2, ...]`), only the gas overrides on `tx1` are
+   * honored — a UserOperation has a single set of gas fields regardless of how many calls it batches.
+   *
+   * @param {EvmErc4337Transaction | EvmErc4337Transaction[]} tx -  The transaction, or an array of multiple transactions to send in batch.
    * @param {Partial<EvmErc4337WalletPaymasterTokenConfig | EvmErc4337WalletSponsorshipPolicyConfig | EvmErc4337WalletNativeCoinsConfig>} [config] - If set, overrides the given configuration options.
    * @returns {Promise<TransactionResult>} The transaction's result.
    */
@@ -419,26 +425,16 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
 
   /** @private */
   async _buildAtNonce (quote, txs, allocatedNonce, config) {
-    const result = await this._buildUserOperation(WalletAccountReadOnlyEvmErc4337._toMetaTransactions(txs), config)
-
-    if (result.userOp.nonce !== allocatedNonce) {
-      result.userOp.nonce = allocatedNonce
-      if (allocatedNonce > 0n && result.userOp.factory != null) {
-        result.userOp.factory = null
-        result.userOp.factoryData = null
-      }
-      const mode = WalletAccountReadOnlyEvmErc4337._resolvePaymasterMode(config)
-      if (mode !== 'native') {
-        const reapplied = await this._applyPaymasterToUserOp({
-          mode,
-          smartAccount: result.smartAccount,
-          userOp: result.userOp,
-          config,
-          chainId: result.chainId
-        })
-        result.userOp = reapplied.userOp
-      }
+    const overrides = {
+      nonce: allocatedNonce,
+      ...WalletAccountReadOnlyEvmErc4337._extractGasOverrides(txs[0])
     }
+
+    const result = await this._buildUserOperation(
+      WalletAccountReadOnlyEvmErc4337._toMetaTransactions(txs),
+      config,
+      overrides
+    )
 
     return { ...quote, userOp: result.userOp, smartAccount: result.smartAccount, chainId: result.chainId }
   }
@@ -476,12 +472,18 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
       return cached
     }
 
+    const txOverrides = {}
+    if (cached.userOp.callGasLimit !== undefined) txOverrides.callGasLimit = cached.userOp.callGasLimit
+    if (cached.userOp.verificationGasLimit !== undefined) txOverrides.verificationGasLimit = cached.userOp.verificationGasLimit
+    if (cached.userOp.preVerificationGas !== undefined) txOverrides.preVerificationGas = cached.userOp.preVerificationGas
+
     const { userOp, tokenQuote } = await this._applyPaymasterToUserOp({
       mode,
       smartAccount: cached.smartAccount,
       userOp: cached.userOp,
       config,
-      chainId: cached.chainId
+      chainId: cached.chainId,
+      txOverrides
     })
 
     cached.userOp = userOp
@@ -533,7 +535,11 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
   async _signUserOperation (txs, { config, cachedBuild }) {
     const { userOp, smartAccount, chainId } = cachedBuild?.userOp
       ? cachedBuild
-      : await this._buildUserOperation(WalletAccountReadOnlyEvmErc4337._toMetaTransactions(txs), config)
+      : await this._buildUserOperation(
+        WalletAccountReadOnlyEvmErc4337._toMetaTransactions(txs),
+        config,
+        WalletAccountReadOnlyEvmErc4337._extractGasOverrides(txs[0])
+      )
 
     const signer = {
       address: this._ownerAccountAddress,
