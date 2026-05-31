@@ -405,7 +405,7 @@ describe('@wdk/wallet-evm-erc-4337', () => {
     }
 
     for (const account of [account0, account1]) {
-      expect(account.keyPair.privateKey).toBe(undefined)
+      expect(account.keyPair.privateKey).toBeNull()
 
       await expect(account.sign(MESSAGE)).rejects.toThrow('Uint8Array expected')
       await expect(account.sendTransaction(TRANSACTION)).rejects.toThrow()
