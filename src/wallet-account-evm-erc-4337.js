@@ -55,6 +55,10 @@ const QUOTE_MAX_AGE_MS = 2 * 60 * 1_000
 
 const USDT_MAINNET_ADDRESS = '0xdAC17F958D2ee523a2206206994597C13D831ec7'
 
+const NONCE_SEQUENCE_BITS = 64n
+const NONCE_SEQUENCE_MASK = (1n << NONCE_SEQUENCE_BITS) - 1n
+const NONCE_KEY_RANDOM_BYTES = 16
+
 /** @implements {IWalletAccount} */
 export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc4337 {
   /**
@@ -87,6 +91,9 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
      * @type {Map<string, TransactionQuote>}
      */
     this._quoteCache = new Map()
+
+    /** @private */
+    this._nonceKey = WalletAccountEvmErc4337._randomNonceKey()
 
     /** @private */
     this._nextNonce = undefined
@@ -233,7 +240,9 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
       return { fee: 0n }
     }
 
-    const gasCostResult = await this._getUserOperationGasCost([tx].flat(), mergedConfig)
+    const gasCostResult = await this._getUserOperationGasCost([tx].flat(), mergedConfig, {
+      nonce: await this._fetchNonce()
+    })
 
     const fee = BigInt(gasCostResult.fee) * FEE_TOLERANCE_COEFFICIENT / 100n
 
@@ -385,7 +394,7 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     this._nonceLock = new Promise(resolve => { release = resolve })
     try {
       await prev
-      const onChain = await fetchAccountNonce(this._provider, this._config.entryPointAddress ?? ENTRYPOINT_V7, this._address)
+      const onChain = await this._fetchNonce()
       const next = this._nextNonce !== undefined && this._nextNonce > onChain ? this._nextNonce : onChain
       this._nextNonce = next + 1n
       return next
@@ -399,6 +408,17 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
     if (WalletAccountEvmErc4337._isPreAcceptanceError(error)) {
       this._nextNonce = undefined
     }
+  }
+
+  /** @private */
+  async _fetchNonce () {
+    const nonceKey = await this._getNonceKey()
+    return await fetchAccountNonce(this._provider, this._config.entryPointAddress ?? ENTRYPOINT_V7, this._address, nonceKey)
+  }
+
+  /** @private */
+  async _getNonceKey () {
+    return await this._isSmartAccountDeployed() ? this._nonceKey : 0n
   }
 
   /** @private */
@@ -511,6 +531,27 @@ export default class WalletAccountEvmErc4337 extends WalletAccountReadOnlyEvmErc
   /** @private */
   static _getTxKey (tx) {
     return JSON.stringify([tx].flat(), (_, v) => typeof v === 'bigint' ? v.toString() : v)
+  }
+
+  /** @private */
+  static _getNonceSequence (nonce) {
+    return nonce & NONCE_SEQUENCE_MASK
+  }
+
+  /** @private */
+  static _randomNonceKey () {
+    const bytes = new Uint8Array(NONCE_KEY_RANDOM_BYTES)
+    const crypto = globalThis.crypto
+
+    if (crypto?.getRandomValues) {
+      crypto.getRandomValues(bytes)
+    } else {
+      for (let i = 0; i < bytes.length; i++) {
+        bytes[i] = Math.floor(Math.random() * 256)
+      }
+    }
+
+    return bytes.reduce((key, byte) => (key << 8n) + BigInt(byte), 0n)
   }
 
   /** @private */

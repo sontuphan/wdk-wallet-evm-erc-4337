@@ -465,12 +465,19 @@ export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOn
     const overrides = WalletAccountReadOnlyEvmErc4337._getInitCodeOverrides(config)
     const safeAddress = await this.getAddress()
 
-    if (await SafeAccount030.isDeployed(safeAddress, this._provider)) {
+    if (await this._isSmartAccountDeployed(safeAddress)) {
       this._deployedSmartAccount = new SafeAccount030(safeAddress, overrides)
       return this._deployedSmartAccount
     }
 
     return SafeAccount030.initializeNewAccount([this._ownerAccountAddress], overrides)
+  }
+
+  /** @private */
+  async _isSmartAccountDeployed (safeAddress = this._address) {
+    if (this._deployedSmartAccount) return true
+
+    return await SafeAccount030.isDeployed(safeAddress, this._provider)
   }
 
   /**
@@ -683,12 +690,16 @@ export default class WalletAccountReadOnlyEvmErc4337 extends WalletAccountReadOn
    * @protected
    * @param {EvmErc4337Transaction[]} txs - The EVM transactions to include in the UserOperation.
    * @param {Omit<EvmErc4337WalletConfig, 'transferMaxFee'>} config - The wallet configuration to use for the build.
+   * @param {EvmErc4337GasOverrides} [buildOverrides] - Additional UserOperation overrides applied after transaction overrides.
    * @returns {Promise<BuiltUserOperation & Omit<TransactionResult, 'hash'>>} The built operation plus its raw fee (no tolerance buffer applied).
    * @throws {Error} If the token paymaster reports AA50 (account does not hold the paymaster token).
    */
-  async _getUserOperationGasCost (txs, config) {
+  async _getUserOperationGasCost (txs, config, buildOverrides = {}) {
     const calls = WalletAccountReadOnlyEvmErc4337._toMetaTransactions(txs)
-    const txOverrides = WalletAccountReadOnlyEvmErc4337._extractGasOverrides(txs[0])
+    const txOverrides = {
+      ...WalletAccountReadOnlyEvmErc4337._extractGasOverrides(txs[0]),
+      ...buildOverrides
+    }
 
     try {
       const buildResult = await this._buildUserOperation(calls, config, txOverrides)
